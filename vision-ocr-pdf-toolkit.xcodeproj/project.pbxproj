@@ -7,26 +7,26 @@
 	objects = {
 
 /* Begin PBXFileReference section */
-		1F40F4922F0151DC000544E1 /* cpdf-merge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "cpdf-merge.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		1F40F4922F0151DC000544E1 /* vision-ocr-pdf-toolkit.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "vision-ocr-pdf-toolkit.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		1F14E8D22F018CC400C6B71B /* Exceptions for "cpdf-merge" folder in "cpdf-merge" target */ = {
+		1F0E3ED62F04C407001B7033 /* Exceptions for "vision-ocr-pdf-toolkit" folder in "vision-ocr-pdf-toolkit" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
-			target = 1F40F4912F0151DC000544E1 /* cpdf-merge */;
+			target = 1F40F4912F0151DC000544E1 /* vision-ocr-pdf-toolkit */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		1F40F4942F0151DC000544E1 /* cpdf-merge */ = {
+		1F0E3EC32F04BD56001B7033 /* vision-ocr-pdf-toolkit */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				1F14E8D22F018CC400C6B71B /* Exceptions for "cpdf-merge" folder in "cpdf-merge" target */,
+				1F0E3ED62F04C407001B7033 /* Exceptions for "vision-ocr-pdf-toolkit" folder in "vision-ocr-pdf-toolkit" target */,
 			);
-			path = "cpdf-merge";
+			path = "vision-ocr-pdf-toolkit";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -45,15 +45,15 @@
 		1F40F4892F0151DC000544E1 = {
 			isa = PBXGroup;
 			children = (
-				1F40F4942F0151DC000544E1 /* cpdf-merge */,
 				1F40F4932F0151DC000544E1 /* Products */,
+				1F0E3EC32F04BD56001B7033 /* vision-ocr-pdf-toolkit */,
 			);
 			sourceTree = "<group>";
 		};
 		1F40F4932F0151DC000544E1 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				1F40F4922F0151DC000544E1 /* cpdf-merge.app */,
+				1F40F4922F0151DC000544E1 /* vision-ocr-pdf-toolkit.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -61,9 +61,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		1F40F4912F0151DC000544E1 /* cpdf-merge */ = {
+		1F40F4912F0151DC000544E1 /* vision-ocr-pdf-toolkit */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 1F40F49D2F0151DE000544E1 /* Build configuration list for PBXNativeTarget "cpdf-merge" */;
+			buildConfigurationList = 1F40F49D2F0151DE000544E1 /* Build configuration list for PBXNativeTarget "vision-ocr-pdf-toolkit" */;
 			buildPhases = (
 				1F40F48E2F0151DC000544E1 /* Sources */,
 				1F40F48F2F0151DC000544E1 /* Frameworks */,
@@ -74,13 +74,13 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				1F40F4942F0151DC000544E1 /* cpdf-merge */,
+				1F0E3EC32F04BD56001B7033 /* vision-ocr-pdf-toolkit */,
 			);
-			name = "cpdf-merge";
+			name = "vision-ocr-pdf-toolkit";
 			packageProductDependencies = (
 			);
 			productName = "cpdf-merge";
-			productReference = 1F40F4922F0151DC000544E1 /* cpdf-merge.app */;
+			productReference = 1F40F4922F0151DC000544E1 /* vision-ocr-pdf-toolkit.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -98,7 +98,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 1F40F48D2F0151DC000544E1 /* Build configuration list for PBXProject "cpdf-merge" */;
+			buildConfigurationList = 1F40F48D2F0151DC000544E1 /* Build configuration list for PBXProject "vision-ocr-pdf-toolkit" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -112,7 +112,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				1F40F4912F0151DC000544E1 /* cpdf-merge */,
+				1F40F4912F0151DC000544E1 /* vision-ocr-pdf-toolkit */,
 			);
 		};
 /* End PBXProject section */
@@ -267,7 +267,7 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "cpdf-merge/Info.plist";
+				INFOPLIST_FILE = "vision-ocr-pdf-toolkit/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "";
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -276,7 +276,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Marcello2020-dev.cpdf-merge";
+				PRODUCT_BUNDLE_IDENTIFIER = "Marcello2020-dev.vision-ocr-pdf-toolkit";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -299,7 +299,7 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "cpdf-merge/Info.plist";
+				INFOPLIST_FILE = "vision-ocr-pdf-toolkit/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "";
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -308,7 +308,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Marcello2020-dev.cpdf-merge";
+				PRODUCT_BUNDLE_IDENTIFIER = "Marcello2020-dev.vision-ocr-pdf-toolkit";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -323,7 +323,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		1F40F48D2F0151DC000544E1 /* Build configuration list for PBXProject "cpdf-merge" */ = {
+		1F40F48D2F0151DC000544E1 /* Build configuration list for PBXProject "vision-ocr-pdf-toolkit" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				1F40F49B2F0151DE000544E1 /* Debug */,
@@ -332,7 +332,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		1F40F49D2F0151DE000544E1 /* Build configuration list for PBXNativeTarget "cpdf-merge" */ = {
+		1F40F49D2F0151DE000544E1 /* Build configuration list for PBXNativeTarget "vision-ocr-pdf-toolkit" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				1F40F49E2F0151DE000544E1 /* Debug */,

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
    LastUpgradeVersion = "2620"
-   version = "1.7">
+   version = "2.2">
    <BuildAction
       parallelizeBuildables = "YES"
       buildImplicitDependencies = "YES"
@@ -12,14 +12,9 @@
             buildForRunning = "YES"
             buildForProfiling = "YES"
             buildForArchiving = "YES"
-            buildForAnalyzing = "YES">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "1F40F4912F0151DC000544E1"
-               BuildableName = "cpdf-merge.app"
-               BlueprintName = "cpdf-merge"
-               ReferencedContainer = "container:cpdf-merge.xcodeproj">
-            </BuildableReference>
+            buildForAnalyzing = "NO">
+            <AutocreatedTestPlanReference>
+            </AutocreatedTestPlanReference>
          </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
@@ -47,9 +42,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "1F40F4912F0151DC000544E1"
-            BuildableName = "cpdf-merge.app"
-            BlueprintName = "cpdf-merge"
-            ReferencedContainer = "container:cpdf-merge.xcodeproj">
+            BuildableName = "vision-ocr-pdf-toolkit.app"
+            BlueprintName = "vision-ocr-pdf-toolkit"
+            ReferencedContainer = "container:vision-ocr-pdf-toolkit.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
       <AdditionalOptions>
@@ -70,16 +65,15 @@
       savedToolIdentifier = ""
       useCustomWorkingDirectory = "NO"
       debugDocumentVersioning = "YES">
-      <BuildableProductRunnable
-         runnableDebuggingMode = "0">
+      <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "1F40F4912F0151DC000544E1"
-            BuildableName = "cpdf-merge.app"
-            BlueprintName = "cpdf-merge"
-            ReferencedContainer = "container:cpdf-merge.xcodeproj">
+            BuildableName = "vision-ocr-pdf-toolkit.app"
+            BlueprintName = "vision-ocr-pdf-toolkit"
+            ReferencedContainer = "container:vision-ocr-pdf-toolkit.xcodeproj">
          </BuildableReference>
-      </BuildableProductRunnable>
+      </MacroExpansion>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">
