@@ -71,9 +71,17 @@ struct OCRView: View {
                     }
 
                     logText += "=== Vision (1/2) ===\n"
-                    startOCR()
+                    runBothOCR()
                 }
                 .disabled(!canRunOCREngineCommon)
+                
+                Button("Deskew → Vision") {
+                    logText = ""
+                    logText += "=== Deskew → Vision (OCRmyPDF ohne OCR, dann Vision Textlayer) ===\n"
+                    logText += "ocrmypdf available: \(ocrmypdfAvailable) (\(OCRMyPDFService.defaultPath))\n\n"
+                    runDeskewThenVision()
+                }
+                .disabled(!canRunOCRMyPDF)
                 
             }
 
@@ -220,13 +228,14 @@ struct OCRView: View {
                     try VisionOCRService.ocrToSearchablePDF(
                         inputPDF: inURL,
                         outputPDF: tmpOut,
-                        options: opts
-                    ) { cur, total in
-                        DispatchQueue.main.async {
-                            self.statusText = "OCR läuft… Seite \(cur)/\(total)"
+                        options: opts,
+                        progress: { cur, total in
+                            DispatchQueue.main.async { self.statusText = "OCR läuft… Seite \(cur)/\(total)" }
+                        },
+                        log: { line in
+                            DispatchQueue.main.async { self.logText += line + "\n" }
                         }
-                    }
-
+                    )
                     DispatchQueue.main.async {
                         do {
                             if FileManager.default.fileExists(atPath: outFile.path) {
@@ -313,6 +322,8 @@ struct OCRView: View {
                 tmpOut.path
             ]
 
+            self.logText += "Args: \(args.joined(separator: " "))\n"
+            
             OCRMyPDFService.run(arguments: args) { code, out, err in
                 DispatchQueue.main.async {
                     if !out.isEmpty { self.logText += out + "\n" }
@@ -347,6 +358,135 @@ struct OCRView: View {
 
         if FileManager.default.fileExists(atPath: finalOutURL.path) {
             pendingOverwritePath = finalOutURL.path
+            pendingWork = run
+            showOverwriteAlert = true
+            return
+        }
+
+        run()
+    }
+    
+    private func runDeskewThenVision() {
+        guard let inputURL = inputPDF else { return }
+        guard let outFile = outURL(forEngineSuffix: "(Vision+Deskew)") else { return }
+
+        let run = {
+            self.isRunning = true
+            self.lastOCRPDFURL = nil
+            self.statusText = "Deskew läuft… (OCRmyPDF)"
+
+            // Temp dir für beide Schritte
+            let tempDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("deskew-vision-\(UUID().uuidString)", isDirectory: true)
+
+            func cleanup() {
+                try? FileManager.default.removeItem(at: tempDir)
+            }
+
+            do {
+                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            } catch {
+                self.isRunning = false
+                self.statusText = "Fehler: Temp-Ordner"
+                self.logText += "\(error)\n"
+                return
+            }
+
+            let tmpDeskewPDF = tempDir.appendingPathComponent("deskew.pdf")
+            let tmpVisionOut = tempDir.appendingPathComponent("vision.pdf")
+
+            self.logText += "Backend 1/2: OCRmyPDF (Deskew-only, kein OCR)\n"
+            self.logText += "Input: \(inputURL.path)\n"
+            self.logText += "Temp deskew: \(tmpDeskewPDF.path)\n"
+            self.logText += "Final: \(outFile.path)\n"
+            self.logText += "ocrmypdf: \(OCRMyPDFService.defaultPath)\n\n"
+
+            // OCRmyPDF: nur Vorverarbeitung (Deskew/Rotate), KEIN Textlayer:
+            // tesseract-timeout=0 -> kein OCR-Lauf
+            let argsDeskewOnly: [String] = [
+                "--output-type", "pdf",
+                "--tesseract-timeout=0",
+                "--rotate-pages",
+                "--deskew",
+                inputURL.path,
+                tmpDeskewPDF.path
+            ]
+
+            OCRMyPDFService.run(arguments: argsDeskewOnly) { code, out, err in
+                DispatchQueue.main.async {
+                    if !out.isEmpty { self.logText += out + "\n" }
+                    if !err.isEmpty { self.logText += err + "\n" }
+
+                    if code != 0 {
+                        self.isRunning = false
+                        self.statusText = "Fehler: Deskew (Exit \(code))"
+                        cleanup()
+                        return
+                    }
+
+                    self.logText += "\nBackend 2/2: Vision (Textlayer)\n"
+                    self.statusText = "OCR läuft… (Vision)"
+                }
+
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        let opts = VisionOCRService.Options(
+                            languages: ["de-DE", "en-US"],
+                            recognitionLevel: .accurate,
+                            usesLanguageCorrection: true,
+                            renderScale: 2.0,
+                            skipPagesWithExistingText: true
+                        )
+
+                        try VisionOCRService.ocrToSearchablePDF(
+                            inputPDF: tmpDeskewPDF,
+                            outputPDF: tmpVisionOut,
+                            options: opts,
+                            progress: { cur, total in
+                                DispatchQueue.main.async {
+                                    self.statusText = "OCR läuft… (Vision) Seite \(cur)/\(total)"
+                                }
+                            },
+                            log: { line in
+                                DispatchQueue.main.async {
+                                    self.logText += line + "\n"
+                                }
+                            }
+                        )
+
+                        DispatchQueue.main.async {
+                            do {
+                                if FileManager.default.fileExists(atPath: outFile.path) {
+                                    try FileManager.default.removeItem(at: outFile)
+                                }
+                                try FileManager.default.moveItem(at: tmpVisionOut, to: outFile)
+
+                                self.lastOCRPDFURL = outFile
+                                self.statusText = "Fertig: \(outFile.lastPathComponent)"
+                                self.logText += "Saved to: \(outFile.path)\n"
+                            } catch {
+                                self.statusText = "Fehler: Output speichern"
+                                self.logText += "Could not save output: \(error)\n"
+                            }
+
+                            self.isRunning = false
+                            cleanup()
+                        }
+                    } catch {
+                        DispatchQueue.main.async {
+                            self.isRunning = false
+                            self.statusText = "Fehler: Vision OCR"
+                            self.logText += "\(error.localizedDescription)\n"
+                            cleanup()
+                        }
+                    }
+                }
+            }
+        }
+
+        // Ask before overwrite
+        if FileManager.default.fileExists(atPath: outFile.path) {
+            pendingOverwritePath = outFile.path
             pendingWork = run
             showOverwriteAlert = true
             return

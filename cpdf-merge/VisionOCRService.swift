@@ -45,7 +45,8 @@ enum VisionOCRService {
         inputPDF: URL,
         outputPDF: URL,
         options: Options = Options(),
-        progress: @escaping (_ currentPage: Int, _ totalPages: Int) -> Void
+        progress: @escaping (_ currentPage: Int, _ totalPages: Int) -> Void,
+        log: ((_ line: String) -> Void)? = nil
     ) throws {
 
         guard let doc = PDFDocument(url: inputPDF) else { throw OCRError.cannotOpenPDF }
@@ -57,7 +58,15 @@ enum VisionOCRService {
         }
 
         // We create a PDF context with per-page beginPDFPage(mediaBox) calls.
-        var dummyBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        // Wichtig: nicht "Letter" hardcoden – sonst kann oben/unten Inhalt fehlen.
+        guard let firstRef = doc.page(at: 0)?.pageRef else { throw OCRError.cannotGetPage(1) }
+
+        let firstChosen = bestBox(for: firstRef)
+        var firstRect = firstRef.getBoxRect(firstChosen)
+        if firstRect.isEmpty { firstRect = firstRef.getBoxRect(.cropBox) }
+        if firstRect.isEmpty { firstRect = CGRect(x: 0, y: 0, width: 612, height: 792) } // letzter Fallback
+
+        var dummyBox = CGRect(x: 0, y: 0, width: firstRect.width, height: firstRect.height)
         guard let ctx = CGContext(consumer: consumer, mediaBox: &dummyBox, nil) else {
             throw OCRError.cannotCreateOutputContext
         }
@@ -69,11 +78,18 @@ enum VisionOCRService {
                 throw OCRError.cannotGetPage(pageIndex + 1)
             }
 
-            // Use the page’s cropBox if available; otherwise mediaBox.
-            let box: CGPDFBox = .cropBox
+            // Robust: nimm die größte sinnvolle Box (Faxe/Scans haben oft eine "falsche" MediaBox)
+            let box: CGPDFBox = bestBox(for: cgPage)
             var pageBox = cgPage.getBoxRect(box)
+
+            // Fallbacks (nur zur Sicherheit)
+            if pageBox.isEmpty { pageBox = cgPage.getBoxRect(.cropBox) }
             if pageBox.isEmpty { pageBox = cgPage.getBoxRect(.mediaBox) }
 
+            let mb = cgPage.getBoxRect(.mediaBox)
+            let cb = cgPage.getBoxRect(.cropBox)
+            log?("Page \(pageIndex + 1): chosen=\(boxName(box)) rotation=\(cgPage.rotationAngle) mediaBox=\(mb) cropBox=\(cb)")
+            
             let targetRect = CGRect(x: 0, y: 0, width: pageBox.width, height: pageBox.height)
 
             // Optional: skip if page already has text
@@ -81,15 +97,22 @@ enum VisionOCRService {
                 let existing = (page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if !existing.isEmpty {
                     // Still copy the page into output (no OCR overlay)
-                    ctx.beginPDFPage([kCGPDFContextMediaBox as String: targetRect] as CFDictionary)
-                    drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect)
+                    let pageInfo: [CFString: Any] = [
+                        kCGPDFContextMediaBox: targetRect,
+                        kCGPDFContextCropBox:  targetRect,
+                        kCGPDFContextTrimBox:  targetRect,
+                        kCGPDFContextBleedBox: targetRect,
+                        kCGPDFContextArtBox:   targetRect
+                    ]
+                    ctx.beginPDFPage(pageInfo as CFDictionary)
+                    drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle)
                     ctx.endPDFPage()
                     continue
                 }
             }
 
             // Render image for OCR
-            guard let cgImage = render(page: cgPage, box: box, targetRect: targetRect, scale: options.renderScale) else {
+            guard let cgImage = render(page: cgPage, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle, scale: options.renderScale) else {
                 throw OCRError.cannotRenderPage(pageIndex + 1)
             }
 
@@ -97,8 +120,15 @@ enum VisionOCRService {
             let observations = try recognizeText(on: cgImage, options: options)
 
             // Write output page: original content + invisible text
-            ctx.beginPDFPage([kCGPDFContextMediaBox as String: targetRect] as CFDictionary)
-            drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect)
+            let pageInfo: [CFString: Any] = [
+                kCGPDFContextMediaBox: targetRect,
+                kCGPDFContextCropBox:  targetRect,
+                kCGPDFContextTrimBox:  targetRect,
+                kCGPDFContextBleedBox: targetRect,
+                kCGPDFContextArtBox:   targetRect
+            ]
+            ctx.beginPDFPage(pageInfo as CFDictionary)
+            drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle)
             overlayInvisibleText(observations, in: ctx, targetRect: targetRect, imageSize: CGSize(width: cgImage.width, height: cgImage.height), renderScale: options.renderScale)
             ctx.endPDFPage()
         }
@@ -122,16 +152,16 @@ enum VisionOCRService {
 
     // MARK: - Rendering
 
-    private static func drawPDFPage(_ cgPage: CGPDFPage, into ctx: CGContext, box: CGPDFBox, targetRect: CGRect) {
+    private static func drawPDFPage(_ cgPage: CGPDFPage, into ctx: CGContext, box: CGPDFBox, targetRect: CGRect, rotate: Int32) {
         ctx.saveGState()
         // Use CGPDFPage’s drawing transform to map page space into our targetRect.
-        let t = cgPage.getDrawingTransform(box, rect: targetRect, rotate: 0, preserveAspectRatio: true)
+        let t = cgPage.getDrawingTransform(box, rect: targetRect, rotate: rotate, preserveAspectRatio: false)
         ctx.concatenate(t)
         ctx.drawPDFPage(cgPage)
         ctx.restoreGState()
     }
 
-    private static func render(page cgPage: CGPDFPage, box: CGPDFBox, targetRect: CGRect, scale: CGFloat) -> CGImage? {
+    private static func render(page cgPage: CGPDFPage, box: CGPDFBox, targetRect: CGRect, rotate: Int32, scale: CGFloat) -> CGImage? {
         let widthPx  = max(1, Int((targetRect.width  * scale).rounded(.up)))
         let heightPx = max(1, Int((targetRect.height * scale).rounded(.up)))
 
@@ -157,7 +187,7 @@ enum VisionOCRService {
         // Map PDF into bitmap
         bm.saveGState()
         bm.scaleBy(x: scale, y: scale)
-        let t = cgPage.getDrawingTransform(box, rect: targetRect, rotate: 0, preserveAspectRatio: true)
+        let t = cgPage.getDrawingTransform(box, rect: targetRect, rotate: rotate, preserveAspectRatio: false)
         bm.concatenate(t)
         bm.drawPDFPage(cgPage)
         bm.restoreGState()
@@ -230,4 +260,34 @@ enum VisionOCRService {
 
         ctx.restoreGState()
     }
+    
+    // MARK: - Box selection (avoid cropping / wrong page size)
+
+    private static func bestBox(for page: CGPDFPage) -> CGPDFBox {
+        let candidates: [CGPDFBox] = [.mediaBox, .cropBox, .trimBox, .bleedBox, .artBox]
+
+        var best: (box: CGPDFBox, area: CGFloat) = (.mediaBox, 0)
+
+        for b in candidates {
+            let r = page.getBoxRect(b)
+            if r.isEmpty { continue }
+            let area = abs(r.width * r.height)
+            if area > best.area {
+                best = (b, area)
+            }
+        }
+        return best.box
+    }
+
+    private static func boxName(_ b: CGPDFBox) -> String {
+        switch b {
+        case .mediaBox: return "mediaBox"
+        case .cropBox:  return "cropBox"
+        case .trimBox:  return "trimBox"
+        case .bleedBox: return "bleedBox"
+        case .artBox:   return "artBox"
+        @unknown default: return "unknown"
+        }
+    }
+    
 }
