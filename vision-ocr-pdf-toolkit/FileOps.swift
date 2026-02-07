@@ -23,4 +23,13 @@ enum FileOps {
         }
         try fm.moveItem(at: from, to: to)
     }
+
+    static func replaceItemAtomically(at destination: URL, with source: URL) throws {
+        let fm = FileManager.default
+        do {
+            _ = try fm.replaceItemAt(destination, withItemAt: source)
+        } catch {
+            try moveReplacingItem(from: source, to: destination)
+        }
+    }
 }

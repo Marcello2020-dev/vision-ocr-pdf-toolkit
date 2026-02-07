@@ -1,29 +1,56 @@
 import SwiftUI
 import AppKit
 import Vision
+import PDFKit
 
 struct OCRView: View {
 
+    private enum PreviewMode: String, CaseIterable, Identifiable {
+        case original
+        case ocr
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .original: return "Original"
+            case .ocr: return "OCR-Vorschau"
+            }
+        }
+    }
+
     @State private var inputPDF: URL? = nil
-    @State private var outputFolderURL: URL? = nil
 
-    @State private var outputBaseName: String = ""
     @State private var isRunning: Bool = false
+    @State private var isSaving: Bool = false
     @State private var statusText: String = "Bereit"
-    @State private var logText: String = ""
+    @State private var diagnosticsLog: String = ""
 
-    @State private var lastOCRPDFURL: URL? = nil
-
-    // Overwrite prompt (single-file MVP)
-    @State private var showOverwriteAlert: Bool = false
-    @State private var pendingOverwritePath: String = ""
-    @State private var pendingWork: (() -> Void)? = nil
+    @State private var lastSavedPDFURL: URL? = nil
+    @State private var pendingOCRTempURL: URL? = nil
+    @State private var pendingTempDirURL: URL? = nil
+    @State private var previewMode: PreviewMode = .original
+    @State private var previewReloadToken: UUID = UUID()
 
     private var canRunVisionOCR: Bool {
-        guard inputPDF != nil else { return false }
-        guard outputFolderURL != nil else { return false }
-        guard !FileOps.sanitizedBaseName(outputBaseName).isEmpty else { return false }
-        return !isRunning
+        inputPDF != nil && !isRunning && !isSaving
+    }
+
+    private var canSave: Bool {
+        inputPDF != nil && pendingOCRTempURL != nil && !isRunning && !isSaving
+    }
+
+    private var canDiscard: Bool {
+        pendingOCRTempURL != nil && !isRunning && !isSaving
+    }
+
+    private var previewURL: URL? {
+        switch previewMode {
+        case .original:
+            return inputPDF
+        case .ocr:
+            return pendingOCRTempURL ?? inputPDF
+        }
     }
 
     var body: some View {
@@ -31,17 +58,27 @@ struct OCRView: View {
 
             HStack(spacing: 10) {
                 Button("PDF auswählen…") { pickPDF() }
-                    .disabled(isRunning)
+                    .disabled(isRunning || isSaving)
 
                 Spacer()
 
-                Button("OCR-PDF im Finder zeigen") { revealLast() }
-                    .disabled(lastOCRPDFURL == nil || isRunning)
+                Button("PDF im Finder zeigen") { revealCurrent() }
+                    .disabled(inputPDF == nil || isRunning || isSaving)
 
                 Button("OCR Vision starten") {
                     runVisionOCR()
                 }
                 .disabled(!canRunVisionOCR)
+
+                Button("Speichern") {
+                    saveInPlace()
+                }
+                .disabled(!canSave)
+
+                Button("Verwerfen") {
+                    discardPendingOCR()
+                }
+                .disabled(!canDiscard)
             }
 
             Group {
@@ -53,59 +90,51 @@ struct OCRView: View {
                     .foregroundStyle(inputPDF == nil ? .secondary : .primary)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Output Ordner:")
-                        .font(.headline)
-                    Spacer()
-                    Button("Output Ordner wählen…") { pickOutputFolder() }
-                        .disabled(inputPDF == nil || isRunning)
+            HStack(spacing: 12) {
+                Text("Vorschau:")
+                    .font(.headline)
+
+                Picker("Vorschau", selection: $previewMode) {
+                    ForEach(PreviewMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 320)
+                .disabled(inputPDF == nil)
 
-                Text(outputFolderURL?.path ?? "—")
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(outputFolderURL == nil ? .secondary : .primary)
-
-                HStack(spacing: 10) {
-                    Text("Output-Dateiname:")
-                        .font(.headline)
-
-                    TextField("", text: $outputBaseName)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: .infinity)
-
-                    Text(".pdf")
-                        .foregroundStyle(.secondary)
-                }
+                Spacer()
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Status:")
-                    .font(.headline)
-                Text(statusText)
+            PDFPreviewRepresentable(url: previewURL, reloadToken: previewReloadToken)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
 
-                TextEditor(text: $logText)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 160)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+            if previewMode == .ocr && pendingOCRTempURL == nil {
+                Text("Noch keine OCR-Vorschau vorhanden. Starte zuerst OCR.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(pendingOCRTempURL == nil ? "Keine ungespeicherten OCR-Änderungen." : "Ungespeicherte OCR-Änderungen vorhanden.")
+                .foregroundStyle(pendingOCRTempURL == nil ? .secondary : .primary)
+
+            HStack(spacing: 10) {
+                Text("Status: \(statusText)")
+                    .font(.callout)
+                    .lineLimit(1)
+
+                Spacer()
+
+                Button("Diagnoselog kopieren") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(diagnosticsLog, forType: .string)
+                    appendStatus("Diagnoselog in Zwischenablage kopiert.")
+                }
+                .disabled(diagnosticsLog.isEmpty)
             }
         }
         .padding(14)
-        .frame(minWidth: 860, minHeight: 720)
-        .alert("Datei existiert bereits", isPresented: $showOverwriteAlert) {
-            Button("Abbrechen", role: .cancel) {
-                pendingWork = nil
-                pendingOverwritePath = ""
-                statusText = "Abgebrochen"
-            }
-            Button("Ersetzen", role: .destructive) {
-                pendingWork?()
-                pendingWork = nil
-                pendingOverwritePath = ""
-            }
-        } message: {
-            Text("Die Datei existiert bereits:\n\(pendingOverwritePath)\n\nMöchtest du sie ersetzen?")
-        }
+        .frame(minWidth: 900, minHeight: 760, maxHeight: .infinity)
     }
 
     // MARK: - UI Actions
@@ -115,131 +144,198 @@ struct OCRView: View {
               let first = selected.first
         else {
             statusText = "Keine PDF ausgewählt"
+            appendStatus("Keine PDF ausgewählt.")
             return
         }
 
-        inputPDF = first
-
-        // Default output folder: parent of selected PDF
-        if outputFolderURL == nil {
-            outputFolderURL = first.deletingLastPathComponent()
+        if pendingOCRTempURL != nil {
+            discardPendingOCR(silent: true)
+            appendStatus("Ungespeicherte OCR-Änderungen wurden verworfen.")
         }
 
-        // Suggested output name: "<Originalname> OCR"
-        let base = first.deletingPathExtension().lastPathComponent
-        outputBaseName = "\(base) OCR"
-
+        inputPDF = first
+        lastSavedPDFURL = nil
+        previewMode = .original
+        previewReloadToken = UUID()
         statusText = "PDF gewählt"
+        appendStatus("PDF gewählt: \(first.lastPathComponent)")
     }
 
-    private func pickOutputFolder() {
-        guard let folder = FileDialogHelpers.chooseFolder() else { return }
-        outputFolderURL = folder
-        statusText = "Output-Ordner gesetzt"
-    }
-
-    private func revealLast() {
-        guard let url = lastOCRPDFURL else { return }
+    private func revealCurrent() {
+        guard let url = inputPDF ?? lastSavedPDFURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     private func runVisionOCR() {
         guard let inURL = inputPDF else { return }
-        guard let outFile = outURL() else { return }
 
-        let run = {
-            self.isRunning = true
-            self.statusText = "OCR läuft…"
-            self.logText = ""
-            self.logText += "=== Vision OCR ===\n"
-            self.lastOCRPDFURL = nil
-
-            // Write to temp first, then move into place on success.
-            let tempDir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("visionocr-\(UUID().uuidString)", isDirectory: true)
-
-            do {
-                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-            } catch {
-                self.isRunning = false
-                self.statusText = "Fehler: Temp-Ordner"
-                self.logText += "\(error)\n"
-                return
-            }
-
-            let tmpOut = tempDir.appendingPathComponent("ocr_tmp.pdf")
-
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let opts = VisionOCRService.Options(
-                        languages: ["de-DE", "en-US"],
-                        recognitionLevel: .accurate,
-                        usesLanguageCorrection: true,
-                        renderScale: 3.0,
-                        skipPagesWithExistingText: true,
-                        debugBandAngleEstimation: false,
-                        bandAngleBandCount: 20
-                    )
-
-                    try VisionOCRService.ocrToSearchablePDF(
-                        inputPDF: inURL,
-                        outputPDF: tmpOut,
-                        options: opts,
-                        progress: { cur, total in
-                            DispatchQueue.main.async { self.statusText = "OCR läuft… Seite \(cur)/\(total)" }
-                        },
-                        log: { line in
-                            DispatchQueue.main.async { self.logText += line + "\n" }
-                        }
-                    )
-
-                    DispatchQueue.main.async {
-                        do {
-                            if FileManager.default.fileExists(atPath: outFile.path) {
-                                try FileManager.default.removeItem(at: outFile)
-                            }
-                            try FileManager.default.moveItem(at: tmpOut, to: outFile)
-
-                            self.lastOCRPDFURL = outFile
-                            self.statusText = "Fertig: \(outFile.lastPathComponent)"
-                            self.logText += "Backend: Vision (VNRecognizeTextRequest)\n"
-                            self.logText += "Saved to: \(outFile.path)\n"
-                        } catch {
-                            self.statusText = "Fehler: Output speichern"
-                            self.logText += "Could not save output: \(error)\n"
-                        }
-
-                        self.isRunning = false
-                        try? FileManager.default.removeItem(at: tempDir)
-                    }
-                } catch {
-                    DispatchQueue.main.async {
-                        self.isRunning = false
-                        self.statusText = "Fehler: OCR"
-                        self.logText += "\(error.localizedDescription)\n"
-                        try? FileManager.default.removeItem(at: tempDir)
-                    }
-                }
-            }
+        if pendingOCRTempURL != nil {
+            discardPendingOCR(silent: true)
         }
 
-        // Ask before overwrite
-        if FileManager.default.fileExists(atPath: outFile.path) {
-            pendingOverwritePath = outFile.path
-            pendingWork = run
-            showOverwriteAlert = true
+        isRunning = true
+        statusText = "OCR läuft…"
+        diagnosticsLog = "=== Vision OCR ===\n"
+        appendStatus("OCR gestartet.")
+        lastSavedPDFURL = nil
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("visionocr-\(UUID().uuidString)", isDirectory: true)
+
+        do {
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        } catch {
+            isRunning = false
+            statusText = "Fehler: Temp-Ordner"
+            appendStatus("Temp-Ordner konnte nicht angelegt werden.")
+            diagnosticsLog += "\(error)\n"
             return
         }
 
-        run()
+        let tmpOut = tempDir.appendingPathComponent("ocr_tmp.pdf")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let opts = VisionOCRService.Options(
+                    languages: ["de-DE", "en-US"],
+                    recognitionLevel: .accurate,
+                    usesLanguageCorrection: true,
+                    renderScale: 3.0,
+                    skipPagesWithExistingText: true,
+                    debugBandAngleEstimation: false,
+                    bandAngleBandCount: 20
+                )
+
+                try VisionOCRService.ocrToSearchablePDF(
+                    inputPDF: inURL,
+                    outputPDF: tmpOut,
+                    options: opts,
+                    progress: { cur, total in
+                        DispatchQueue.main.async { self.statusText = "OCR läuft… Seite \(cur)/\(total)" }
+                    },
+                    log: { line in
+                        DispatchQueue.main.async { self.diagnosticsLog += line + "\n" }
+                    }
+                )
+
+                DispatchQueue.main.async {
+                    self.pendingOCRTempURL = tmpOut
+                    self.pendingTempDirURL = tempDir
+                    self.previewMode = .ocr
+                    self.previewReloadToken = UUID()
+                    self.isRunning = false
+                    self.statusText = "OCR fertig. Zum Übernehmen auf Speichern klicken."
+                    self.appendStatus("OCR fertig. Änderungen sind noch nicht gespeichert.")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isRunning = false
+                    self.statusText = "Fehler: OCR"
+                    self.appendStatus("OCR fehlgeschlagen.")
+                    self.diagnosticsLog += "\(error.localizedDescription)\n"
+                    self.cleanupTempArtifacts()
+                }
+            }
+        }
     }
 
-    private func outURL() -> URL? {
-        guard let outFolder = outputFolderURL else { return nil }
-        let base = FileOps.sanitizedBaseName(outputBaseName)
-        guard !base.isEmpty else { return nil }
-        return outFolder
-            .appendingPathComponent(base)
-            .appendingPathExtension("pdf")
+    private func saveInPlace() {
+        guard let inURL = inputPDF,
+              let tmpOut = pendingOCRTempURL else { return }
+
+        isSaving = true
+        statusText = "Speichern…"
+        appendStatus("Speichern gestartet: \(inURL.lastPathComponent)")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try FileOps.replaceItemAtomically(at: inURL, with: tmpOut)
+
+                DispatchQueue.main.async {
+                    self.isSaving = false
+                    self.lastSavedPDFURL = inURL
+                    self.previewMode = .original
+                    self.previewReloadToken = UUID()
+                    self.statusText = "Gespeichert: \(inURL.lastPathComponent)"
+                    self.appendStatus("Originaldatei aktualisiert.")
+                    self.cleanupTempArtifacts()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isSaving = false
+                    self.statusText = "Fehler: Speichern"
+                    self.appendStatus("Speichern fehlgeschlagen.")
+                    self.diagnosticsLog += "Could not save output: \(error)\n"
+                }
+            }
+        }
+    }
+
+    private func discardPendingOCR(silent: Bool = false) {
+        cleanupTempArtifacts()
+        if !silent {
+            statusText = "Ungespeicherte OCR-Änderungen verworfen"
+            appendStatus("Ungespeicherte OCR-Änderungen verworfen.")
+        }
+    }
+
+    private func cleanupTempArtifacts() {
+        let tempDir = pendingTempDirURL
+        pendingOCRTempURL = nil
+        pendingTempDirURL = nil
+        previewReloadToken = UUID()
+        if let tempDir {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+    }
+
+    private func appendStatus(_ line: String) {
+        diagnosticsLog += "[status] \(line)\n"
+    }
+}
+
+private struct PDFPreviewRepresentable: NSViewRepresentable {
+    let url: URL?
+    let reloadToken: UUID
+
+    final class Coordinator {
+        var lastURL: URL?
+        var lastReloadToken: UUID?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.displaysPageBreaks = true
+        view.backgroundColor = NSColor.windowBackgroundColor
+        if #available(macOS 13.0, *) {
+            // Keep preview interaction focused on navigation/zoom, not text selection heuristics.
+            view.isInMarkupMode = true
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: PDFView, context: Context) {
+        let needsReload = context.coordinator.lastURL != url ||
+            context.coordinator.lastReloadToken != reloadToken
+
+        guard needsReload else { return }
+        context.coordinator.lastURL = url
+        context.coordinator.lastReloadToken = reloadToken
+
+        guard let url else {
+            nsView.document = nil
+            return
+        }
+
+        nsView.document = PDFDocument(url: url)
+        nsView.autoScales = true
+        nsView.setCurrentSelection(nil, animate: false)
     }
 }
