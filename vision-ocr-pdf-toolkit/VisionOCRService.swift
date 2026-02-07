@@ -21,6 +21,16 @@ enum VisionOCRService {
         var usesLanguageCorrection: Bool = true
         var renderScale: CGFloat = 2.0
         var skipPagesWithExistingText: Bool = true
+        /// If true and `skipPagesWithExistingText` is false, pages with existing text are rebuilt
+        /// from rendered pixels + fresh OCR layer, effectively replacing the prior text layer.
+        var replaceExistingTextLayer: Bool = false
+        var enableConfidenceSecondPass: Bool = true
+        var secondPassConfidenceThreshold: VNConfidence = 0.82
+        var secondPassMaxCandidatesPerPage: Int = 24
+        var secondPassPaddingFraction: CGFloat = 0.08
+        var secondPassUpscaleFactor: CGFloat = 2.0
+        var secondPassMaxCropPixels: Int = 3_500_000
+        var secondPassMinTextLength: Int = 3
 
         // Optional diagnostics for local angle model.
         var debugBandAngleEstimation: Bool = false
@@ -169,23 +179,23 @@ enum VisionOCRService {
             
             let targetRect = CGRect(x: 0, y: 0, width: pageBox.width, height: pageBox.height)
 
+            let existing = (page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasExistingText = !existing.isEmpty
+
             // Optional: skip if page already has text
-            if effectiveOptions.skipPagesWithExistingText {
-                let existing = (page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                if !existing.isEmpty {
-                    // Still copy the page into output (no OCR overlay)
-                    let pageInfo: [CFString: Any] = [
-                        kCGPDFContextMediaBox: targetRect,
-                        kCGPDFContextCropBox:  targetRect,
-                        kCGPDFContextTrimBox:  targetRect,
-                        kCGPDFContextBleedBox: targetRect,
-                        kCGPDFContextArtBox:   targetRect
-                    ]
-                    ctx.beginPDFPage(pageInfo as CFDictionary)
-                    drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle)
-                    ctx.endPDFPage()
-                    continue
-                }
+            if effectiveOptions.skipPagesWithExistingText && hasExistingText {
+                // Still copy the page into output (no OCR overlay)
+                let pageInfo: [CFString: Any] = [
+                    kCGPDFContextMediaBox: targetRect,
+                    kCGPDFContextCropBox:  targetRect,
+                    kCGPDFContextTrimBox:  targetRect,
+                    kCGPDFContextBleedBox: targetRect,
+                    kCGPDFContextArtBox:   targetRect
+                ]
+                ctx.beginPDFPage(pageInfo as CFDictionary)
+                drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle)
+                ctx.endPDFPage()
+                continue
             }
 
             // Render image for OCR
@@ -258,10 +268,12 @@ enum VisionOCRService {
                 logger: { line in log?("Page \(pageIndex + 1) GEO: \(line)") }
             )
 
-            let candidates: [OCRCandidate] = observations.flatMap { obs in
-                guard let best = obs.topCandidates(1).first else { return [OCRCandidate]() }
-                return Self.buildCandidates(from: best, observation: obs, imageSize: recognitionSize)
-            }
+            let candidates: [OCRCandidate] = Self.buildCandidatesWithConfidenceRefinement(
+                observations: observations,
+                image: recognitionImage,
+                options: effectiveOptions,
+                logger: { line in log?("Page \(pageIndex + 1) OCR: \(line)") }
+            )
 
             let model = Self.buildLocalAngleModel(
                 from: candidates,
@@ -373,7 +385,11 @@ enum VisionOCRService {
                 kCGPDFContextArtBox:   targetRect
             ]
             ctx.beginPDFPage(pageInfo as CFDictionary)
-            drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle)
+            if hasExistingText && effectiveOptions.replaceExistingTextLayer {
+                drawRenderedImagePage(cgImage, into: ctx, targetRect: targetRect)
+            } else {
+                drawPDFPage(cgPage, into: ctx, box: box, targetRect: targetRect, rotate: cgPage.rotationAngle)
+            }
             overlayInvisibleText(boxes, in: ctx, imageSize: originalSize, imageToPDF: imageToPDF)
             ctx.endPDFPage()
         }
@@ -771,8 +787,7 @@ enum VisionOCRService {
         imageSize: CGSize,
         centers: [CGPoint]
     ) -> CGFloat? {
-        let robust = robustAngleFromOrderedCenters(centers, imageSize: imageSize)
-        let ls = angleFromPointCloud(centers, imageSize: imageSize)
+        let precise = preciseAngleFromCenters(centers, imageSize: imageSize)
         let quadAngles: [CGFloat] = row.compactMap { c in
             angleFromQuad(
                 tl: c.topLeft,
@@ -784,14 +799,16 @@ enum VisionOCRService {
         }
         let quadMedian: CGFloat? = quadAngles.isEmpty ? nil : median(quadAngles)
 
-        if let robust, let ls {
-            let deltaDeg = abs(Double((robust - ls) * 180.0 / .pi))
-            if deltaDeg <= 1.2 {
-                return robust * 0.7 + ls * 0.3
+        if let precise {
+            if let quadMedian {
+                let deltaDeg = abs(Double((precise - quadMedian) * 180.0 / .pi))
+                if deltaDeg <= 2.0 {
+                    return precise * 0.85 + quadMedian * 0.15
+                }
             }
-            return robust
+            return precise
         }
-        return robust ?? ls ?? quadMedian ?? dominantBaselineAngleFromCharacterBoxes(row, imageSize: imageSize)
+        return quadMedian ?? dominantBaselineAngleFromCharacterBoxes(row, imageSize: imageSize)
     }
 
     private static func robustAngleFromOrderedCenters(_ points: [CGPoint], imageSize: CGSize) -> CGFloat? {
@@ -905,7 +922,7 @@ enum VisionOCRService {
 
         for row in rows {
             guard row.count >= 3 else { continue }
-            guard let angle = angleFromPointCloud(row, imageSize: imageSize) else { continue }
+            guard let angle = preciseAngleFromCenters(row, imageSize: imageSize) else { continue }
 
             let xs = row.map(\.x)
             guard let minX = xs.min(), let maxX = xs.max() else { continue }
@@ -965,6 +982,275 @@ enum VisionOCRService {
 
     private static func quadCenterY(tl: CGPoint, tr: CGPoint, br: CGPoint, bl: CGPoint) -> CGFloat {
         (tl.y + tr.y + br.y + bl.y) * 0.25
+    }
+
+    private static func buildCandidatesWithConfidenceRefinement(
+        observations: [VNRecognizedTextObservation],
+        image: CGImage,
+        options: Options,
+        logger: ((String) -> Void)? = nil
+    ) -> [OCRCandidate] {
+        guard !observations.isEmpty else { return [] }
+
+        let imageSize = CGSize(width: image.width, height: image.height)
+
+        if !options.enableConfidenceSecondPass {
+            let base = observations.flatMap { obs -> [OCRCandidate] in
+                guard let best = obs.topCandidates(1).first else { return [] }
+                return buildCandidates(from: best, observation: obs, imageSize: imageSize)
+            }
+            return deduplicateCandidates(base)
+        }
+
+        let lowConfidence: [(index: Int, confidence: VNConfidence)] = observations.enumerated().compactMap { index, obs in
+            guard let best = obs.topCandidates(1).first else { return nil }
+            let text = best.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.count < options.secondPassMinTextLength { return nil }
+            if best.confidence >= options.secondPassConfidenceThreshold { return nil }
+            if obs.boundingBox.width < 0.01 || obs.boundingBox.height < 0.006 { return nil }
+            return (index, best.confidence)
+        }
+        .sorted { $0.confidence < $1.confidence }
+
+        let maxCandidates = max(0, options.secondPassMaxCandidatesPerPage)
+        let selectedSet = Set(lowConfidence.prefix(maxCandidates).map(\.index))
+
+        var refinedCount = 0
+        var candidates: [OCRCandidate] = []
+        candidates.reserveCapacity(observations.count * 2)
+
+        for (index, obs) in observations.enumerated() {
+            guard let best = obs.topCandidates(1).first else { continue }
+            let baseCandidates = buildCandidates(from: best, observation: obs, imageSize: imageSize)
+
+            guard selectedSet.contains(index) else {
+                candidates.append(contentsOf: baseCandidates)
+                continue
+            }
+
+            if let refined = refineObservationWithSecondPass(
+                observation: obs,
+                image: image,
+                options: options,
+                logger: logger
+            ),
+                !refined.isEmpty {
+                refinedCount += 1
+                candidates.append(contentsOf: refined)
+            } else {
+                candidates.append(contentsOf: baseCandidates)
+            }
+        }
+
+        logger?(
+            "confidence-second-pass: low=\(lowConfidence.count) selected=\(selectedSet.count) refined=\(refinedCount)"
+        )
+
+        return deduplicateCandidates(candidates)
+    }
+
+    private static func refineObservationWithSecondPass(
+        observation: VNRecognizedTextObservation,
+        image: CGImage,
+        options: Options,
+        logger: ((String) -> Void)? = nil
+    ) -> [OCRCandidate]? {
+        guard let top = observation.topCandidates(1).first else { return nil }
+
+        guard let cropNormRect = makePaddedNormalizedRect(
+            observation.boundingBox,
+            paddingFraction: options.secondPassPaddingFraction
+        ) else { return nil }
+
+        guard let cropImage = cropImage(image, normalizedRect: cropNormRect) else { return nil }
+
+        let basePixels = max(1, cropImage.width * cropImage.height)
+        let maxPixels = max(1, options.secondPassMaxCropPixels)
+        let maxScaleByPixels = sqrt(CGFloat(maxPixels) / CGFloat(basePixels))
+        let requestedScale = max(1.0, options.secondPassUpscaleFactor)
+        let appliedScale = min(requestedScale, maxScaleByPixels)
+
+        let secondPassImage: CGImage
+        if appliedScale > 1.01,
+           let upscaled = scaleCGImageByRedraw(cgImage: cropImage, scale: appliedScale) {
+            secondPassImage = upscaled
+        } else {
+            secondPassImage = cropImage
+        }
+
+        var secondPassOptions = options
+        secondPassOptions.recognitionLevel = .accurate
+        secondPassOptions.enableConfidenceSecondPass = false
+
+        let refinedObservations: [VNRecognizedTextObservation]
+        do {
+            refinedObservations = try recognizeText(
+                on: secondPassImage,
+                options: secondPassOptions,
+                logger: nil
+            )
+        } catch {
+            logger?("confidence-second-pass failed: \(error.localizedDescription)")
+            return nil
+        }
+
+        guard !refinedObservations.isEmpty else { return nil }
+
+        let refinedTopConfidence = refinedObservations
+            .compactMap { $0.topCandidates(1).first?.confidence }
+            .max() ?? 0
+
+        // Avoid replacing the base result with a clearly weaker local rerun.
+        if refinedTopConfidence + 0.05 < top.confidence {
+            return nil
+        }
+
+        let cropSize = CGSize(width: secondPassImage.width, height: secondPassImage.height)
+        var mapped: [OCRCandidate] = []
+        mapped.reserveCapacity(refinedObservations.count * 2)
+
+        for ro in refinedObservations {
+            guard let best = ro.topCandidates(1).first else { continue }
+            let locals = buildCandidates(from: best, observation: ro, imageSize: cropSize)
+            for local in locals {
+                let global = mapCandidateFromCropToPage(
+                    local,
+                    cropRect: cropNormRect,
+                    pageImageSize: CGSize(width: image.width, height: image.height)
+                )
+                let overlap = iou(global.bounds, observation.boundingBox)
+                if overlap >= 0.02 || verticalOverlapRatio(global.bounds, observation.boundingBox) >= 0.20 {
+                    mapped.append(global)
+                }
+            }
+        }
+
+        return mapped.isEmpty ? nil : deduplicateCandidates(mapped)
+    }
+
+    private static func makePaddedNormalizedRect(_ rect: CGRect, paddingFraction: CGFloat) -> CGRect? {
+        if rect.isNull || rect.isEmpty { return nil }
+        let p = max(0, paddingFraction)
+        let padX = rect.width * p
+        let padY = rect.height * p
+        let padded = rect.insetBy(dx: -padX, dy: -padY)
+        let clipped = padded.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        if clipped.isNull || clipped.isEmpty { return nil }
+        if clipped.width < 0.005 || clipped.height < 0.003 { return nil }
+        return clipped
+    }
+
+    private static func cropImage(_ image: CGImage, normalizedRect: CGRect) -> CGImage? {
+        let w = CGFloat(image.width)
+        let h = CGFloat(image.height)
+        if w <= 0 || h <= 0 { return nil }
+
+        // Vision normalized coordinates use bottom-left origin, CGImage crop uses top-left.
+        let x = normalizedRect.minX * w
+        let y = (1 - normalizedRect.maxY) * h
+        let cw = normalizedRect.width * w
+        let ch = normalizedRect.height * h
+
+        var crop = CGRect(
+            x: floor(x),
+            y: floor(y),
+            width: ceil(cw),
+            height: ceil(ch)
+        )
+        crop = crop.intersection(CGRect(x: 0, y: 0, width: w, height: h))
+        if crop.isNull || crop.isEmpty || crop.width < 2 || crop.height < 2 {
+            return nil
+        }
+
+        return image.cropping(to: crop)
+    }
+
+    private static func mapPointFromCropToPage(_ p: CGPoint, cropRect: CGRect) -> CGPoint {
+        CGPoint(
+            x: cropRect.minX + p.x * cropRect.width,
+            y: cropRect.minY + p.y * cropRect.height
+        )
+    }
+
+    private static func mapCandidateFromCropToPage(
+        _ candidate: OCRCandidate,
+        cropRect: CGRect,
+        pageImageSize: CGSize
+    ) -> OCRCandidate {
+        let tl = mapPointFromCropToPage(candidate.tl, cropRect: cropRect)
+        let tr = mapPointFromCropToPage(candidate.tr, cropRect: cropRect)
+        let br = mapPointFromCropToPage(candidate.br, cropRect: cropRect)
+        let bl = mapPointFromCropToPage(candidate.bl, cropRect: cropRect)
+
+        let bounds = axisAlignedBoundsOfQuad(tl: tl, tr: tr, br: br, bl: bl)
+        let centerY = quadCenterY(tl: tl, tr: tr, br: br, bl: bl)
+
+        return OCRCandidate(
+            text: candidate.text,
+            tl: tl,
+            tr: tr,
+            br: br,
+            bl: bl,
+            bounds: bounds,
+            centerY: centerY,
+            measuredAngle: candidate.measuredAngle,
+            isAxisAligned: isLikelyAxisAlignedQuad(
+                tl: tl,
+                tr: tr,
+                br: br,
+                bl: bl,
+                imageSize: pageImageSize
+            )
+        )
+    }
+
+    private static func deduplicateCandidates(_ candidates: [OCRCandidate]) -> [OCRCandidate] {
+        guard !candidates.isEmpty else { return [] }
+
+        let sorted = candidates.sorted { a, b in
+            let areaA = a.bounds.width * a.bounds.height
+            let areaB = b.bounds.width * b.bounds.height
+            if abs(areaA - areaB) > 1e-8 {
+                return areaA > areaB
+            }
+            return a.text.count > b.text.count
+        }
+
+        var out: [OCRCandidate] = []
+        out.reserveCapacity(sorted.count)
+
+        for c in sorted {
+            let keyC = normalizedTextKey(c.text)
+            if keyC.isEmpty { continue }
+
+            var duplicate = false
+            for existing in out {
+                let overlap = iou(c.bounds, existing.bounds)
+                if overlap < 0.72 { continue }
+
+                let keyE = normalizedTextKey(existing.text)
+                if keyE.isEmpty { continue }
+                if keyC == keyE || keyC.hasPrefix(keyE) || keyE.hasPrefix(keyC) {
+                    duplicate = true
+                    break
+                }
+            }
+
+            if !duplicate {
+                out.append(c)
+            }
+        }
+
+        return out.sorted { $0.centerY > $1.centerY }
+    }
+
+    private static func normalizedTextKey(_ text: String) -> String {
+        text
+            .lowercased()
+            .unicodeScalars
+            .filter { !$0.properties.isWhitespace }
+            .map(String.init)
+            .joined()
     }
 
     private static func buildCandidates(
@@ -1211,7 +1497,7 @@ enum VisionOCRService {
         imageSize: CGSize
     ) -> CGFloat? {
         let centers = sampledCenters(for: recognizedText)
-        if let angle = angleFromPointCloud(centers, imageSize: imageSize) {
+        if let angle = preciseAngleFromCenters(centers, imageSize: imageSize) {
             return angle
         }
 
@@ -1256,6 +1542,10 @@ enum VisionOCRService {
             points.append(CGPoint(x: cx, y: cy))
         }
 
+        // Add character-level samples for more precise baseline estimation.
+        let perChar = sampledCharacterCenters(for: recognizedText, maxSamples: 28)
+        points.append(contentsOf: perChar)
+
         // De-duplicate near-identical centers.
         var unique: [CGPoint] = []
         unique.reserveCapacity(points.count)
@@ -1268,6 +1558,136 @@ enum VisionOCRService {
             }
         }
         return unique
+    }
+
+    private static func sampledCharacterCenters(
+        for recognizedText: VNRecognizedText,
+        maxSamples: Int
+    ) -> [CGPoint] {
+        let text = recognizedText.string
+        let total = text.count
+        if total <= 1 { return [] }
+
+        let chars = Array(text)
+        let visibleOffsets: [Int] = chars.enumerated().compactMap { idx, ch in
+            characterIsWhitespace(ch) ? nil : idx
+        }
+        if visibleOffsets.count < 2 { return [] }
+
+        let target = max(2, maxSamples)
+        let step = max(1, visibleOffsets.count / target)
+        var sampleOffsets: [Int] = []
+        sampleOffsets.reserveCapacity(target + 2)
+
+        var i = 0
+        while i < visibleOffsets.count {
+            sampleOffsets.append(visibleOffsets[i])
+            i += step
+        }
+        if let last = visibleOffsets.last, sampleOffsets.last != last {
+            sampleOffsets.append(last)
+        }
+
+        var out: [CGPoint] = []
+        out.reserveCapacity(sampleOffsets.count)
+
+        for offset in sampleOffsets {
+            let start = text.index(text.startIndex, offsetBy: offset)
+            let end = text.index(after: start)
+            guard let rect = try? recognizedText.boundingBox(for: start..<end) else { continue }
+            let cx = (rect.topLeft.x + rect.topRight.x + rect.bottomRight.x + rect.bottomLeft.x) * 0.25
+            let cy = (rect.topLeft.y + rect.topRight.y + rect.bottomRight.y + rect.bottomLeft.y) * 0.25
+            out.append(CGPoint(x: cx, y: cy))
+        }
+
+        return out
+    }
+
+    private static func preciseAngleFromCenters(_ points: [CGPoint], imageSize: CGSize) -> CGFloat? {
+        guard points.count >= 2 else { return nil }
+
+        let robust = robustAngleFromOrderedCenters(points, imageSize: imageSize)
+        let ls = angleFromPointCloud(points, imageSize: imageSize)
+
+        var base = robust ?? ls
+        guard let startAngle = base else { return nil }
+
+        if let refined = refineAngleUsingInliers(
+            points: points,
+            initialAngle: startAngle,
+            imageSize: imageSize
+        ) {
+            base = refined
+        }
+
+        if let robust, let ls {
+            let deltaDeg = abs(Double((robust - ls) * 180.0 / .pi))
+            if deltaDeg <= 1.0 {
+                return robust * 0.65 + ls * 0.35
+            }
+        }
+
+        return base
+    }
+
+    private static func refineAngleUsingInliers(
+        points: [CGPoint],
+        initialAngle: CGFloat,
+        imageSize: CGSize
+    ) -> CGFloat? {
+        guard points.count >= 4 else { return nil }
+
+        let w = max(1.0, imageSize.width)
+        let h = max(1.0, imageSize.height)
+        let pxPoints = points.map { CGPoint(x: $0.x * w, y: $0.y * h) }
+
+        let meanX = pxPoints.reduce(0.0) { $0 + $1.x } / CGFloat(pxPoints.count)
+        let meanY = pxPoints.reduce(0.0) { $0 + $1.y } / CGFloat(pxPoints.count)
+        let center = CGPoint(x: meanX, y: meanY)
+
+        let nx = -sin(initialAngle)
+        let ny = cos(initialAngle)
+
+        let signedDistances: [CGFloat] = pxPoints.map { p in
+            let dx = p.x - center.x
+            let dy = p.y - center.y
+            return dx * nx + dy * ny
+        }
+
+        let absDistances = signedDistances.map { abs($0) }
+        let mad = median(absDistances)
+        let threshold = max(1.0, mad * 2.8)
+
+        let inliers = zip(pxPoints, absDistances)
+            .filter { _, d in d <= threshold }
+            .map { p, _ in p }
+
+        guard inliers.count >= 3 else { return nil }
+        return angleFromPixelPoints(inliers)
+    }
+
+    private static func angleFromPixelPoints(_ points: [CGPoint]) -> CGFloat? {
+        guard points.count >= 2 else { return nil }
+
+        let meanX = points.reduce(0.0) { $0 + $1.x } / CGFloat(points.count)
+        let meanY = points.reduce(0.0) { $0 + $1.y } / CGFloat(points.count)
+
+        var num: CGFloat = 0
+        var den: CGFloat = 0
+        for p in points {
+            let dx = p.x - meanX
+            let dy = p.y - meanY
+            num += dx * dy
+            den += dx * dx
+        }
+
+        if den <= 1e-6 { return nil }
+        let angle = atan(num / den)
+        let maxAbsAngle = CGFloat.pi / 4.0
+        if abs(angle) > maxAbsAngle {
+            return nil
+        }
+        return angle
     }
 
     private static func angleFromPointCloud(_ points: [CGPoint], imageSize: CGSize) -> CGFloat? {
@@ -1411,6 +1831,15 @@ enum VisionOCRService {
         let t = cgPage.getDrawingTransform(box, rect: targetRect, rotate: rotate, preserveAspectRatio: false)
         ctx.concatenate(t)
         ctx.drawPDFPage(cgPage)
+        ctx.restoreGState()
+    }
+
+    private static func drawRenderedImagePage(_ image: CGImage, into ctx: CGContext, targetRect: CGRect) {
+        ctx.saveGState()
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(targetRect)
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: targetRect)
         ctx.restoreGState()
     }
 
@@ -1600,6 +2029,36 @@ enum VisionOCRService {
 
         let dstW = max(1, Int((w * scale).rounded()))
         let dstH = max(1, Int((h * scale).rounded()))
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let ctx = CGContext(
+            data: nil,
+            width: dstW,
+            height: dstH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else { return nil }
+
+        ctx.interpolationQuality = .high
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: dstW, height: dstH))
+        return ctx.makeImage()
+    }
+
+    private static func scaleCGImageByRedraw(cgImage: CGImage, scale: CGFloat) -> CGImage? {
+        let factor = max(0.01, scale)
+        if abs(factor - 1) < 0.01 {
+            return cgImage
+        }
+
+        let w = CGFloat(cgImage.width)
+        let h = CGFloat(cgImage.height)
+        guard w > 0, h > 0 else { return nil }
+
+        let dstW = max(1, Int((w * factor).rounded()))
+        let dstH = max(1, Int((h * factor).rounded()))
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue

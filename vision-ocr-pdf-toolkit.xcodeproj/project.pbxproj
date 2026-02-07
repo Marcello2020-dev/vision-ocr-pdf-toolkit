@@ -79,7 +79,7 @@
 			name = "vision-ocr-pdf-toolkit";
 			packageProductDependencies = (
 			);
-				productName = "vision-ocr-pdf-toolkit";
+			productName = "vision-ocr-pdf-toolkit";
 			productReference = 1F40F4922F0151DC000544E1 /* vision-ocr-pdf-toolkit.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -274,7 +274,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "vision-ocr-pdf-toolkit/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "";
-				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -307,7 +307,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "vision-ocr-pdf-toolkit/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "";
-				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

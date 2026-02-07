@@ -201,7 +201,8 @@ struct OCRView: View {
                     recognitionLevel: .accurate,
                     usesLanguageCorrection: true,
                     renderScale: 3.0,
-                    skipPagesWithExistingText: true,
+                    skipPagesWithExistingText: false,
+                    replaceExistingTextLayer: true,
                     debugBandAngleEstimation: false,
                     bandAngleBandCount: 20
                 )
