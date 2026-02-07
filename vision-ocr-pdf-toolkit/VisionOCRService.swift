@@ -294,6 +294,23 @@ enum VisionOCRService {
             // 2) OCR genau einmal ausführen
             let observations = try recognizeText(on: ocrImage, options: effectiveOptions)
 
+            // Vision can occasionally return axis-aligned quads even on skewed pages.
+            // If no deskew was applied, we recover line tilt from a robust global estimate
+            // and use it as fallback for those axis-aligned boxes only.
+            let axisAlignedFallbackAngle: CGFloat = {
+                guard appliedSkew == 0 else { return 0 }
+                guard let estimated = Self.estimateSkewAngleRadians(
+                    cgImage: ocrImage,
+                    options: effectiveOptions,
+                    logger: nil
+                ) else { return 0 }
+
+                let deg = Double(estimated * 180.0 / .pi)
+                guard abs(deg) >= 0.25 else { return 0 }
+                log?(String(format: "Page %d skew: overlay fallback for axis-aligned boxes = %.3f°", pageIndex + 1, deg))
+                return estimated
+            }()
+
             // 3) Beobachtungen -> OCRBox (Quad am Ende immer bezogen aufs ORIGINALBILD)
             let boxes: [OCRBox] = observations.compactMap { obs in
                 guard let best = obs.topCandidates(1).first else { return nil }
@@ -332,6 +349,16 @@ enum VisionOCRService {
                     tr = Self.mapNormalizedPointFromDeskewedToOriginal(tr, skewAngleRadians: appliedSkew, imageSize: originalSize)
                     br = Self.mapNormalizedPointFromDeskewedToOriginal(br, skewAngleRadians: appliedSkew, imageSize: originalSize)
                     bl = Self.mapNormalizedPointFromDeskewedToOriginal(bl, skewAngleRadians: appliedSkew, imageSize: originalSize)
+                } else if axisAlignedFallbackAngle != 0,
+                          Self.isLikelyAxisAlignedQuad(tl: tl, tr: tr, br: br, bl: bl, imageSize: originalSize) {
+                    (tl, tr, br, bl) = Self.rotateNormalizedQuadInImageSpace(
+                        tl: tl,
+                        tr: tr,
+                        br: br,
+                        bl: bl,
+                        angleRadians: axisAlignedFallbackAngle,
+                        imageSize: originalSize
+                    )
                 }
 
                 return OCRBox(text: best.string, tl: tl, tr: tr, br: br, bl: bl)
@@ -1074,6 +1101,90 @@ enum VisionOCRService {
             y: mapped.origin.y / H,
             width: mapped.size.width / W,
             height: mapped.size.height / H
+        )
+    }
+
+    private static func isLikelyAxisAlignedQuad(
+        tl: CGPoint,
+        tr: CGPoint,
+        br: CGPoint,
+        bl: CGPoint,
+        imageSize: CGSize,
+        maxAbsBaselineDegrees: Double = 0.25
+    ) -> Bool {
+        let w = max(1.0, imageSize.width)
+        let h = max(1.0, imageSize.height)
+
+        let tlPx = CGPoint(x: tl.x * w, y: tl.y * h)
+        let trPx = CGPoint(x: tr.x * w, y: tr.y * h)
+        let brPx = CGPoint(x: br.x * w, y: br.y * h)
+        let blPx = CGPoint(x: bl.x * w, y: bl.y * h)
+
+        let vx = brPx.x - blPx.x
+        let vy = brPx.y - blPx.y
+        guard abs(vx) > 1e-6 else { return false }
+
+        let baselineDeg = Double(atan2(vy, vx) * 180.0 / .pi)
+        if abs(baselineDeg) > maxAbsBaselineDegrees {
+            return false
+        }
+
+        // Optional secondary check: top edge follows the same near-horizontal trend.
+        let tvx = trPx.x - tlPx.x
+        let tvy = trPx.y - tlPx.y
+        if abs(tvx) <= 1e-6 { return false }
+        let topDeg = Double(atan2(tvy, tvx) * 180.0 / .pi)
+        return abs(topDeg) <= maxAbsBaselineDegrees
+    }
+
+    private static func rotateNormalizedQuadInImageSpace(
+        tl: CGPoint,
+        tr: CGPoint,
+        br: CGPoint,
+        bl: CGPoint,
+        angleRadians: CGFloat,
+        imageSize: CGSize
+    ) -> (CGPoint, CGPoint, CGPoint, CGPoint) {
+        let w = max(1.0, imageSize.width)
+        let h = max(1.0, imageSize.height)
+
+        func toPixel(_ p: CGPoint) -> CGPoint {
+            CGPoint(x: p.x * w, y: p.y * h)
+        }
+
+        func toNormalized(_ p: CGPoint) -> CGPoint {
+            let cx = min(max(p.x, 0), w)
+            let cy = min(max(p.y, 0), h)
+            return CGPoint(x: cx / w, y: cy / h)
+        }
+
+        let tlPx = toPixel(tl)
+        let trPx = toPixel(tr)
+        let brPx = toPixel(br)
+        let blPx = toPixel(bl)
+
+        let c = CGPoint(
+            x: (tlPx.x + trPx.x + brPx.x + blPx.x) * 0.25,
+            y: (tlPx.y + trPx.y + brPx.y + blPx.y) * 0.25
+        )
+
+        let ca = cos(angleRadians)
+        let sa = sin(angleRadians)
+
+        func rotate(_ p: CGPoint) -> CGPoint {
+            let x = p.x - c.x
+            let y = p.y - c.y
+            return CGPoint(
+                x: (x * ca - y * sa) + c.x,
+                y: (x * sa + y * ca) + c.y
+            )
+        }
+
+        return (
+            toNormalized(rotate(tlPx)),
+            toNormalized(rotate(trPx)),
+            toNormalized(rotate(brPx)),
+            toNormalized(rotate(blPx))
         )
     }
     
