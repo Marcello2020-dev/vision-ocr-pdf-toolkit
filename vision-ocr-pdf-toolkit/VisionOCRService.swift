@@ -150,51 +150,38 @@ enum VisionOCRService {
             throw OCRError.cannotCreateOutputContext
         }
 
-        // Force band count globally for now (debug + median-fallback depend on it).
-        // Requirement: use 20 bands (~15 mm on A4) regardless of caller-provided options.
         var effectiveOptions = options
-        effectiveOptions.bandAngleBandCount = 20
+        let debugBandContext: (dir: URL, pdfBaseName: String)? = {
+            guard effectiveOptions.debugBandAngleEstimation else { return nil }
 
-        // Always export band debug images into a subfolder of the FINAL output directory.
-        // Requirement: The debug images must persist and must be written next to the merged OCR PDF.
-        // We therefore write into:
-        //   <outputPDF directory>/<outputPDF base name> – Bandbilder/run-<unique>/...
+            let outDir = outputPDF.deletingLastPathComponent()
+            let pdfBaseName: String
+            if isProbablyTemporaryDirectory(outDir) {
+                pdfBaseName = inputPDF.deletingPathExtension().lastPathComponent
+            } else {
+                pdfBaseName = outputPDF.deletingPathExtension().lastPathComponent
+            }
 
-        let outDir = outputPDF.deletingLastPathComponent()
-        let pdfBaseName: String
-        if isProbablyTemporaryDirectory(outDir) {
-            pdfBaseName = inputPDF.deletingPathExtension().lastPathComponent
-        } else {
-            pdfBaseName = outputPDF.deletingPathExtension().lastPathComponent
-        }
+            // Pick a stable base directory for debug artifacts.
+            let artifactsBase: URL
+            if let base = artifactsBaseDirectory {
+                artifactsBase = base
+            } else if isProbablyTemporaryDirectory(outDir) {
+                artifactsBase = inputPDF.deletingLastPathComponent()
+                log?("band-export: outputPDF is in a temp directory; using inputPDF folder for artifacts: \(artifactsBase.path)")
+            } else {
+                artifactsBase = outDir
+            }
 
-        // Pick a stable base directory for debug artifacts.
-        // - If the caller provides `artifactsBaseDirectory`, we always use it.
-        // - Else, if `outputPDF` currently points into a temp directory (common when callers write to temp and move later),
-        //   we fall back to the input PDF directory so the debug PNGs survive the run.
-        // - Else, use the output directory.
-        let artifactsBase: URL
-        if let base = artifactsBaseDirectory {
-            artifactsBase = base
-        } else if isProbablyTemporaryDirectory(outDir) {
-            artifactsBase = inputPDF.deletingLastPathComponent()
-            log?("band-export: outputPDF is in a temp directory; using inputPDF folder for artifacts: \(artifactsBase.path)")
-        } else {
-            artifactsBase = outDir
-        }
-
-        // Final debug output folder:
-        //   <artifactsBase>/Bandbilder/...
-        // The user prefers no extra nested folders like "<pdfBaseName> – Bandbilder" or "run-<unique>".
-        // We keep a single stable folder name and encode the PDF base name in the exported filenames.
-        let debugBandBaseDir = artifactsBase.appendingPathComponent("Bandbilder", isDirectory: true)
-
-        do {
-            try FileManager.default.createDirectory(at: debugBandBaseDir, withIntermediateDirectories: true)
-            log?("band-export: writing PNGs to \(debugBandBaseDir.path)")
-        } catch {
-            log?("band-export: FAILED to create dir: \(debugBandBaseDir.path) -> \(error)")
-        }
+            let debugBandBaseDir = artifactsBase.appendingPathComponent("Bandbilder", isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: debugBandBaseDir, withIntermediateDirectories: true)
+                log?("band-export: writing PNGs to \(debugBandBaseDir.path)")
+            } catch {
+                log?("band-export: FAILED to create dir: \(debugBandBaseDir.path) -> \(error)")
+            }
+            return (debugBandBaseDir, pdfBaseName)
+        }()
 
         for pageIndex in 0..<total {
             progress(pageIndex + 1, total)
@@ -241,9 +228,8 @@ enum VisionOCRService {
                 throw OCRError.cannotRenderPage(pageIndex + 1)
             }
 
-            // Always: band-based measurement + band image export for debugging.
-            // This writes per-band PNGs into a subfolder of the output directory.
-            if effectiveOptions.debugBandAngleEstimation {
+            // Optional: band-based measurement for diagnostics.
+            if effectiveOptions.debugBandAngleEstimation, let debugBandContext {
                 log?(String(
                     format: "[Page %d] Band-Angles (Top→Bottom) – bands=%d, search=%.2f°..%.2f°, step=%.2f°, downscaleW=%d",
                     pageIndex + 1,
@@ -253,25 +239,16 @@ enum VisionOCRService {
                     effectiveOptions.bandAngleStepDegrees,
                     effectiveOptions.bandAngleDownscaleMaxWidth
                 ))
-            } else {
-                log?(String(
-                    format: "[Page %d] Band-Images export – bands=%d, downscaleW=%d",
-                    pageIndex + 1,
-                    effectiveOptions.bandAngleBandCount,
-                    effectiveOptions.bandAngleDownscaleMaxWidth
-                ))
-            }
 
-            let angles = Self.measureDeskewAnglesByBands(
-                cgImage: cgImage,
-                options: effectiveOptions,
-                pageNumber: pageIndex + 1,
-                exportDirectory: debugBandBaseDir,
-                pdfBaseName: pdfBaseName,
-                logger: log
-            )
+                let angles = Self.measureDeskewAnglesByBands(
+                    cgImage: cgImage,
+                    options: effectiveOptions,
+                    pageNumber: pageIndex + 1,
+                    exportDirectory: debugBandContext.dir,
+                    pdfBaseName: debugBandContext.pdfBaseName,
+                    logger: log
+                )
 
-            if effectiveOptions.debugBandAngleEstimation {
                 for (i, a) in angles.enumerated() {
                     log?(String(format: "  band %02d: %.3f°", i + 1, a))
                 }
