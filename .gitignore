@@ -11,3 +11,6 @@ DerivedData/
 
 # Build products
 build/
+
+# Local tooling outputs
+_local/
