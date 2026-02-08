@@ -80,7 +80,7 @@ struct PageToolsView: View {
                 Button("Speichern") { saveInPlace() }
                     .disabled(!canSaveInPlace)
 
-                Button("Exportieren als…") { exportEditedDocument() }
+                Button("Speichern als…") { saveAsEditedDocument() }
                     .disabled(!canEdit)
 
                 Spacer()
@@ -380,7 +380,7 @@ struct PageToolsView: View {
         }
     }
 
-    private func exportEditedDocument() {
+    private func saveAsEditedDocument() {
         guard let doc = workingDoc else { return }
         let base = sourceBaseName()
         guard let saveURL = chooseSaveURL(suggestedName: "\(base) Pages.pdf") else {

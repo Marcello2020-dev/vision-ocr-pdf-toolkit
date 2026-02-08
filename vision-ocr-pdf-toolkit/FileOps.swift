@@ -32,4 +32,23 @@ enum FileOps {
             try moveReplacingItem(from: source, to: destination)
         }
     }
+
+    static func copyItemAtomically(from source: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        let folder = destination.deletingLastPathComponent()
+        try ensureFolder(folder)
+
+        let staged = folder.appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).tmp")
+        if fm.fileExists(atPath: staged.path) {
+            try? fm.removeItem(at: staged)
+        }
+
+        do {
+            try fm.copyItem(at: source, to: staged)
+            try replaceItemAtomically(at: destination, with: staged)
+        } catch {
+            try? fm.removeItem(at: staged)
+            throw error
+        }
+    }
 }

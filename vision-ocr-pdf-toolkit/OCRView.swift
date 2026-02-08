@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Vision
 import PDFKit
+import UniformTypeIdentifiers
 
 struct OCRView: View {
 
@@ -72,6 +73,11 @@ struct OCRView: View {
 
                 Button("Speichern") {
                     saveInPlace()
+                }
+                .disabled(!canSave)
+
+                Button("Speichern als…") {
+                    saveAs()
                 }
                 .disabled(!canSave)
 
@@ -225,7 +231,7 @@ struct OCRView: View {
                     self.previewMode = .ocr
                     self.previewReloadToken = UUID()
                     self.isRunning = false
-                    self.statusText = "OCR fertig. Zum Übernehmen auf Speichern klicken."
+                    self.statusText = "OCR fertig. Mit Speichern oder Speichern als übernehmen."
                     self.appendStatus("OCR fertig. Änderungen sind noch nicht gespeichert.")
                 }
             } catch {
@@ -272,6 +278,46 @@ struct OCRView: View {
         }
     }
 
+    private func saveAs() {
+        guard let inURL = inputPDF,
+              let tmpOut = pendingOCRTempURL else { return }
+
+        let suggestedName = suggestedSaveAsName(from: inURL)
+        guard let saveURL = chooseSaveAsURL(suggestedName: suggestedName, sourceURL: inURL) else {
+            statusText = "Speichern als abgebrochen"
+            appendStatus("Speichern als abgebrochen.")
+            return
+        }
+
+        isSaving = true
+        statusText = "Speichern als…"
+        appendStatus("Speichern als gestartet: \(saveURL.lastPathComponent)")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try FileOps.copyItemAtomically(from: tmpOut, to: saveURL)
+
+                DispatchQueue.main.async {
+                    self.isSaving = false
+                    self.inputPDF = saveURL
+                    self.lastSavedPDFURL = saveURL
+                    self.previewMode = .original
+                    self.previewReloadToken = UUID()
+                    self.statusText = "Gespeichert als: \(saveURL.lastPathComponent)"
+                    self.appendStatus("Neue Datei erstellt.")
+                    self.cleanupTempArtifacts()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isSaving = false
+                    self.statusText = "Fehler: Speichern als"
+                    self.appendStatus("Speichern als fehlgeschlagen.")
+                    self.diagnosticsLog += "Could not save output as new file: \(error)\n"
+                }
+            }
+        }
+    }
+
     private func discardPendingOCR(silent: Bool = false) {
         cleanupTempArtifacts()
         if !silent {
@@ -292,6 +338,23 @@ struct OCRView: View {
 
     private func appendStatus(_ line: String) {
         diagnosticsLog += "[status] \(line)\n"
+    }
+
+    private func chooseSaveAsURL(suggestedName: String, sourceURL: URL) -> URL? {
+        let panel = NSSavePanel()
+        panel.title = "OCR-PDF speichern als"
+        panel.canCreateDirectories = true
+        panel.allowedContentTypes = [UTType.pdf]
+        panel.nameFieldStringValue = suggestedName
+        panel.directoryURL = sourceURL.deletingLastPathComponent()
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private func suggestedSaveAsName(from sourceURL: URL) -> String {
+        let raw = sourceURL.deletingPathExtension().lastPathComponent
+        let base = FileOps.sanitizedBaseName(raw)
+        let normalized = base.isEmpty ? "document" : base
+        return "\(normalized) OCR.pdf"
     }
 }
 
