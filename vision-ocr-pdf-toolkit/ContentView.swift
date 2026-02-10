@@ -2,20 +2,26 @@ import SwiftUI
 
 struct ContentView: View {
     var body: some View {
-        TabView {
-            MergeView()
-                .tabItem { Text("PDF zusammenführen") }
+        ZStack {
+            AppTheme.windowGradient
+                .ignoresSafeArea()
 
-            OCRView()
-                .tabItem { Text("PDF OCR") }
+            TabView {
+                MergeView()
+                    .tabItem { Text("PDF zusammenführen") }
 
-            PageToolsView()
-                .tabItem { Text("PDF-Seiten organisieren") }
+                OCRView()
+                    .tabItem { Text("PDF OCR") }
 
-            RedactionView()
-                .tabItem { Text("PDF Schwärzen") }
+                PageToolsView()
+                    .tabItem { Text("PDF Seiten organisieren") }
+
+                RedactionView()
+                    .tabItem { Text("PDF Schwärzen") }
+            }
         }
         .frame(minWidth: 900, minHeight: 600)
+        .tint(AppTheme.primaryAccent)
         .padding()
     }
 }
