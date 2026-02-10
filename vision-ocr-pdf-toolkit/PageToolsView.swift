@@ -220,6 +220,7 @@ struct PageToolsView: View {
         }
         .padding(14)
         .frame(minWidth: 900, minHeight: 720)
+        .background(AppTheme.panelGradient.ignoresSafeArea())
     }
 
     private func pickPDF() {

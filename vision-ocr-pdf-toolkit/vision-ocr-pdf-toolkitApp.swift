@@ -15,6 +15,7 @@ struct vision_ocr_pdf_toolkitApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .tint(AppTheme.primaryAccent)
                 .onAppear {
                     DispatchQueue.main.async {
                         guard let window = NSApplication.shared.windows.first,
@@ -23,6 +24,7 @@ struct vision_ocr_pdf_toolkitApp: App {
 
                         // sichtbare Fläche = Desktop ohne Menüleiste/Dock
                         window.setFrame(screen.visibleFrame, display: true)
+                        AppTheme.applyWindowChrome(window)
                     }
                 }
         }
@@ -32,6 +34,8 @@ struct vision_ocr_pdf_toolkitApp: App {
 
         Window("Diagnose-Log", id: DiagnosticsLogView.windowID) {
             DiagnosticsLogView()
+                .tint(AppTheme.primaryAccent)
+                .background(WindowThemeApplier())
         }
     }
 }

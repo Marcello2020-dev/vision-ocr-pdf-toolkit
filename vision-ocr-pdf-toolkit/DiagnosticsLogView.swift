@@ -36,6 +36,7 @@ struct DiagnosticsLogView: View {
         }
         .padding(14)
         .frame(minWidth: 760, minHeight: 420)
+        .background(AppTheme.panelGradient.ignoresSafeArea())
     }
 
     private func copyLogToPasteboard() {

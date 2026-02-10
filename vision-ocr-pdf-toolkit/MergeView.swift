@@ -271,6 +271,7 @@ struct MergeView: View {
                 }
             }
             .frame(minHeight: 320)
+            .scrollContentBackground(.hidden)
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -323,6 +324,7 @@ struct MergeView: View {
         }
         .padding(14)
         .frame(minWidth: 860, minHeight: 720)
+        .background(AppTheme.panelGradient.ignoresSafeArea())
         .alert("Datei existiert bereits", isPresented: $showOverwriteAlert) {
             Button("Abbrechen", role: .cancel) {
                 // Temp aufräumen (sonst bleibt es liegen)

@@ -162,6 +162,7 @@ struct RedactionView: View {
         }
         .padding(14)
         .frame(minWidth: 900, minHeight: 760, maxHeight: .infinity)
+        .background(AppTheme.panelGradient.ignoresSafeArea())
     }
 
     private func pickPDF() {
@@ -483,7 +484,7 @@ private struct RedactionPDFPreviewRepresentable: NSViewRepresentable {
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
         view.displaysPageBreaks = true
-        view.backgroundColor = NSColor.windowBackgroundColor
+        view.backgroundColor = AppTheme.pdfCanvasBackground
         view.displayBox = .cropBox
         return view
     }

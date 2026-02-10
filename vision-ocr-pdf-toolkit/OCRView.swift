@@ -141,6 +141,7 @@ struct OCRView: View {
         }
         .padding(14)
         .frame(minWidth: 900, minHeight: 760, maxHeight: .infinity)
+        .background(AppTheme.panelGradient.ignoresSafeArea())
     }
 
     // MARK: - UI Actions
@@ -377,7 +378,7 @@ private struct PDFPreviewRepresentable: NSViewRepresentable {
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
         view.displaysPageBreaks = true
-        view.backgroundColor = NSColor.windowBackgroundColor
+        view.backgroundColor = AppTheme.pdfCanvasBackground
         if #available(macOS 13.0, *) {
             // Keep preview interaction focused on navigation/zoom, not text selection heuristics.
             view.isInMarkupMode = true

@@ -22,6 +22,6 @@ struct ContentView: View {
         }
         .frame(minWidth: 900, minHeight: 600)
         .tint(AppTheme.primaryAccent)
-        .padding()
+        .background(WindowThemeApplier())
     }
 }
