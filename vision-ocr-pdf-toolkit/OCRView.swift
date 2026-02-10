@@ -5,6 +5,19 @@ import PDFKit
 import UniformTypeIdentifiers
 
 struct OCRView: View {
+    private struct TextLayerInfo {
+        let pagesWithText: Int
+        let totalPages: Int
+        let extractedCharacters: Int
+
+        var hasTextLayer: Bool {
+            pagesWithText > 0
+        }
+
+        var isComplete: Bool {
+            totalPages > 0 && pagesWithText == totalPages
+        }
+    }
 
     private enum PreviewMode: String, CaseIterable, Identifiable {
         case original
@@ -32,6 +45,10 @@ struct OCRView: View {
     @State private var pendingTempDirURL: URL? = nil
     @State private var previewMode: PreviewMode = .original
     @State private var previewReloadToken: UUID = UUID()
+    @State private var textLayerInfo: TextLayerInfo? = nil
+    @State private var isAnalyzingTextLayer: Bool = false
+    @State private var pendingOCRRecognizedCharacters: Int? = nil
+    @State private var isAnalyzingPendingOCRResult: Bool = false
 
     private var canRunVisionOCR: Bool {
         inputPDF != nil && !isRunning && !isSaving
@@ -94,6 +111,10 @@ struct OCRView: View {
                 Text(inputPDF?.path ?? "—")
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(inputPDF == nil ? .secondary : .primary)
+
+                if inputPDF != nil {
+                    textLayerIndicatorView
+                }
             }
 
             HStack(spacing: 12) {
@@ -124,6 +145,10 @@ struct OCRView: View {
             Text(pendingOCRTempURL == nil ? "Keine ungespeicherten OCR-Änderungen." : "Ungespeicherte OCR-Änderungen vorhanden.")
                 .foregroundStyle(pendingOCRTempURL == nil ? .secondary : .primary)
 
+            if pendingOCRTempURL != nil {
+                pendingOCRResultIndicatorView
+            }
+
             HStack(spacing: 10) {
                 Text("Status: \(statusText)")
                     .font(.callout)
@@ -142,6 +167,61 @@ struct OCRView: View {
         .padding(14)
         .frame(minWidth: 900, minHeight: 760, maxHeight: .infinity)
         .background(AppTheme.panelGradient.ignoresSafeArea())
+    }
+
+    @ViewBuilder
+    private var textLayerIndicatorView: some View {
+        if isAnalyzingTextLayer {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Textlayer wird analysiert…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        } else if let info = textLayerInfo {
+            if info.hasTextLayer {
+                let label = info.isComplete
+                    ? "Textlayer erkannt (\(info.pagesWithText)/\(info.totalPages) Seiten)"
+                    : "Textlayer teilweise erkannt (\(info.pagesWithText)/\(info.totalPages) Seiten)"
+                let symbol = info.isComplete ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
+                let color: Color = info.isComplete ? .green : .orange
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(label, systemImage: symbol)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(color)
+
+                    Text("Extrahierte Zeichen: \(info.extractedCharacters). Vorhandener Textlayer wird beim OCR-Lauf ersetzt.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Label("Kein vorhandener Textlayer erkannt", systemImage: "xmark.seal")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var pendingOCRResultIndicatorView: some View {
+        if isAnalyzingPendingOCRResult {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("OCR-Ergebnis wird ausgewertet…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        } else if let chars = pendingOCRRecognizedCharacters {
+            Label(
+                "Erkannte Zeichen (OCR-Vorschau): \(chars.formatted(.number))",
+                systemImage: "character.cursor.ibeam"
+            )
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.primary)
+        }
     }
 
     // MARK: - UI Actions
@@ -164,8 +244,11 @@ struct OCRView: View {
         lastSavedPDFURL = nil
         previewMode = .original
         previewReloadToken = UUID()
+        pendingOCRRecognizedCharacters = nil
+        isAnalyzingPendingOCRResult = false
         statusText = "PDF gewählt"
         appendStatus("PDF gewählt: \(first.lastPathComponent)")
+        analyzeExistingTextLayer(for: first)
     }
 
     private func revealCurrent() {
@@ -183,6 +266,8 @@ struct OCRView: View {
         isRunning = true
         statusText = "OCR läuft…"
         diagnosticsLog = "=== Vision OCR ===\n"
+        pendingOCRRecognizedCharacters = nil
+        isAnalyzingPendingOCRResult = false
         appendStatus("OCR gestartet.")
         lastSavedPDFURL = nil
 
@@ -234,6 +319,7 @@ struct OCRView: View {
                     self.isRunning = false
                     self.statusText = "OCR fertig. Mit Speichern oder Speichern als übernehmen."
                     self.appendStatus("OCR fertig. Änderungen sind noch nicht gespeichert.")
+                    self.analyzePendingOCRResult(for: tmpOut)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -267,6 +353,7 @@ struct OCRView: View {
                     self.statusText = "Gespeichert: \(inURL.lastPathComponent)"
                     self.appendStatus("Originaldatei aktualisiert.")
                     self.cleanupTempArtifacts()
+                    self.analyzeExistingTextLayer(for: inURL)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -307,6 +394,7 @@ struct OCRView: View {
                     self.statusText = "Gespeichert als: \(saveURL.lastPathComponent)"
                     self.appendStatus("Neue Datei erstellt.")
                     self.cleanupTempArtifacts()
+                    self.analyzeExistingTextLayer(for: saveURL)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -331,6 +419,8 @@ struct OCRView: View {
         let tempDir = pendingTempDirURL
         pendingOCRTempURL = nil
         pendingTempDirURL = nil
+        pendingOCRRecognizedCharacters = nil
+        isAnalyzingPendingOCRResult = false
         previewReloadToken = UUID()
         if let tempDir {
             try? FileManager.default.removeItem(at: tempDir)
@@ -339,6 +429,63 @@ struct OCRView: View {
 
     private func appendStatus(_ line: String) {
         diagnosticsLog += "[status] \(line)\n"
+    }
+
+    private func analyzePendingOCRResult(for url: URL) {
+        isAnalyzingPendingOCRResult = true
+        pendingOCRRecognizedCharacters = nil
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let info = collectTextLayerInfo(for: url)
+
+            DispatchQueue.main.async {
+                guard self.pendingOCRTempURL == url else { return }
+                self.isAnalyzingPendingOCRResult = false
+                self.pendingOCRRecognizedCharacters = info?.extractedCharacters ?? 0
+                if let count = self.pendingOCRRecognizedCharacters {
+                    self.appendStatus("OCR-Vorschau enthält \(count.formatted(.number)) Zeichen.")
+                }
+            }
+        }
+    }
+
+    private func analyzeExistingTextLayer(for url: URL) {
+        isAnalyzingTextLayer = true
+        textLayerInfo = nil
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let info = collectTextLayerInfo(for: url)
+
+            DispatchQueue.main.async {
+                guard self.inputPDF == url else { return }
+                self.isAnalyzingTextLayer = false
+                self.textLayerInfo = info
+            }
+        }
+    }
+
+    private func collectTextLayerInfo(for url: URL) -> TextLayerInfo? {
+        guard let doc = PDFDocument(url: url) else { return nil }
+
+        let totalPages = doc.pageCount
+        var pagesWithText = 0
+        var extractedCharacters = 0
+
+        if totalPages > 0 {
+            for pageIndex in 0..<totalPages {
+                guard let page = doc.page(at: pageIndex) else { continue }
+                let text = (page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if text.isEmpty { continue }
+                pagesWithText += 1
+                extractedCharacters += text.count
+            }
+        }
+
+        return TextLayerInfo(
+            pagesWithText: pagesWithText,
+            totalPages: totalPages,
+            extractedCharacters: extractedCharacters
+        )
     }
 
     private func chooseSaveAsURL(suggestedName: String, sourceURL: URL) -> URL? {
