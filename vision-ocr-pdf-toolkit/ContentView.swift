@@ -4,16 +4,16 @@ struct ContentView: View {
     var body: some View {
         TabView {
             MergeView()
-                .tabItem { Text("Merge") }
+                .tabItem { Text("PDF zusammenführen") }
 
             OCRView()
-                .tabItem { Text("OCR") }
+                .tabItem { Text("PDF OCR") }
 
             PageToolsView()
-                .tabItem { Text("Seiten") }
+                .tabItem { Text("PDF-Seiten organisieren") }
 
             RedactionView()
-                .tabItem { Text("Schwärzen") }
+                .tabItem { Text("PDF Schwärzen") }
         }
         .frame(minWidth: 900, minHeight: 600)
         .padding()
