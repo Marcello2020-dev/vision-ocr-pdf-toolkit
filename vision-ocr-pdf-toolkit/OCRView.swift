@@ -188,25 +188,41 @@ struct OCRView: View {
                     .foregroundStyle(.secondary)
             }
         } else if let info = textLayerInfo {
-            if info.hasTextLayer {
-                let label = info.isComplete
-                    ? "Textlayer erkannt (\(info.pagesWithText)/\(info.totalPages) Seiten)"
-                    : "Textlayer teilweise erkannt (\(info.pagesWithText)/\(info.totalPages) Seiten)"
-                let symbol = info.isComplete ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
-                let color: Color = info.isComplete ? .green : .orange
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Label(label, systemImage: symbol)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(color)
-
-                    Text("Extrahierte Zeichen: \(info.extractedCharacters). Vorhandener Textlayer wird beim OCR-Lauf ersetzt.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            let label: String = {
+                if info.hasTextLayer {
+                    return info.isComplete
+                        ? "Textlayer erkannt (\(info.pagesWithText)/\(info.totalPages) Seiten)"
+                        : "Textlayer teilweise erkannt (\(info.pagesWithText)/\(info.totalPages) Seiten)"
                 }
-            } else {
-                Label("Kein vorhandener Textlayer erkannt", systemImage: "xmark.seal")
+                return "Kein vorhandener Textlayer erkannt"
+            }()
+            let symbol: String = {
+                if info.hasTextLayer {
+                    return info.isComplete ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
+                }
+                return "xmark.seal"
+            }()
+            let color: Color = {
+                if info.hasTextLayer {
+                    return info.isComplete ? .green : .orange
+                }
+                return .secondary
+            }()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Label(label, systemImage: symbol)
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(color)
+
+                characterCountCard(
+                    title: "Erkannte Zeichen (vor OCR)",
+                    count: info.extractedCharacters,
+                    tint: Color.secondary.opacity(0.20),
+                    valueFont: .title3
+                )
+
+                Text("Vorhandener Textlayer wird beim OCR-Lauf ersetzt.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
@@ -223,13 +239,42 @@ struct OCRView: View {
                     .foregroundStyle(.secondary)
             }
         } else if let chars = pendingOCRRecognizedCharacters {
-            Label(
-                "Erkannte Zeichen (OCR-Vorschau): \(chars.formatted(.number))",
-                systemImage: "character.cursor.ibeam"
-            )
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 6) {
+                Label("OCR-Vorschau ausgewertet", systemImage: "checkmark.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.green)
+
+                characterCountCard(
+                    title: "Erkannte Zeichen (nach OCR)",
+                    count: chars,
+                    tint: AppTheme.primaryAccent.opacity(0.20),
+                    valueFont: .title2
+                )
+            }
         }
+    }
+
+    private func characterCountCard(
+        title: String,
+        count: Int,
+        tint: Color,
+        valueFont: Font
+    ) -> some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Text(count.formatted(.number))
+                .font(valueFont.weight(.bold))
+                .monospacedDigit()
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(tint, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     // MARK: - UI Actions
@@ -468,6 +513,9 @@ struct OCRView: View {
                 guard self.inputPDF == url else { return }
                 self.isAnalyzingTextLayer = false
                 self.textLayerInfo = info
+                if let info {
+                    self.appendStatus("Vorhandener Textlayer: \(info.extractedCharacters.formatted(.number)) Zeichen auf \(info.pagesWithText)/\(info.totalPages) Seiten.")
+                }
             }
         }
     }
