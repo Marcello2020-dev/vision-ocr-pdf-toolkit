@@ -209,6 +209,24 @@ struct MergeView: View {
         NSPasteboard.general.setString(mergeErrorDetails, forType: .string)
     }
 
+    private func presentPreflightIssues(_ issues: [MergePipelineService.PreflightIssue]) {
+        guard !issues.isEmpty else { return }
+
+        let sorted = issues.sorted { lhs, rhs in
+            lhs.url.lastPathComponent.localizedStandardCompare(rhs.url.lastPathComponent) == .orderedAscending
+        }
+        let count = sorted.count
+        mergeErrorMessage = count == 1
+            ? "1 Eingabe-PDF kann nicht gemerged werden."
+            : "\(count) Eingabe-PDFs können nicht gemerged werden."
+
+        let lines = sorted.map { issue in
+            "\(issue.url.lastPathComponent): \(issue.localizedReason)"
+        }
+        mergeErrorDetails = lines.joined(separator: "\n")
+        showMergeErrorAlert = true
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
 
@@ -527,11 +545,18 @@ struct MergeView: View {
             )
         }
 
-        mergeWorkItem?.cancel()
-        mergeCancellationRequested = false
         mergeErrorMessage = nil
         mergeErrorDetails = nil
         showMergeErrorAlert = false
+
+        let preflightIssues = MergePipelineService.preflightIssues(for: plans)
+        if !preflightIssues.isEmpty {
+            presentPreflightIssues(preflightIssues)
+            return
+        }
+
+        mergeWorkItem?.cancel()
+        mergeCancellationRequested = false
         setMergeProgress(0.01, "Vorbereitung…", canCancelImmediately: true)
         isRunning = true
 

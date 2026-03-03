@@ -92,7 +92,8 @@ final class MergePipelineServiceTests: XCTestCase {
                 plans: plans,
                 destination: output,
                 isCancelled: { false },
-                progress: { _ in }
+                progress: { _ in },
+                tempDirectoryCandidates: [workspace]
             )
         ) { error in
             guard let pipelineError = error as? MergePipelineService.PipelineError else {
@@ -104,6 +105,87 @@ final class MergePipelineServiceTests: XCTestCase {
                 return
             }
             XCTAssertEqual(badURL.lastPathComponent, "does-not-exist.pdf")
+        }
+    }
+
+    func testRunHandlesLargeInputSet() throws {
+        let workspace = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let output = workspace.appendingPathComponent("large-merged.pdf")
+        let inputCount = 40
+        var plans: [MergePipelineService.InputPlan] = []
+        plans.reserveCapacity(inputCount)
+
+        for idx in 0..<inputCount {
+            let url = workspace.appendingPathComponent("in-\(idx).pdf")
+            try writePDF(to: url, pageCount: 1, marker: "L\(idx)")
+            plans.append(
+                MergePipelineService.InputPlan(
+                    index: idx,
+                    url: url,
+                    title: "Large \(idx)",
+                    shouldImportSourceBookmarks: true
+                )
+            )
+        }
+
+        _ = try MergePipelineService.run(
+            plans: plans,
+            destination: output,
+            isCancelled: { false },
+            progress: { _ in }
+        )
+
+        let merged = try XCTUnwrap(PDFDocument(url: output))
+        XCTAssertEqual(merged.pageCount, inputCount)
+        XCTAssertEqual(merged.outlineRoot?.numberOfChildren, inputCount)
+    }
+
+    func testRunFailsWhenDestinationFolderIsReadOnly() throws {
+        let workspace = try makeScratchDirectory()
+        defer {
+            try? setPOSIXPermissions(of: workspace, to: 0o755)
+            try? FileManager.default.removeItem(at: workspace)
+        }
+
+        let input = workspace.appendingPathComponent("input.pdf")
+        try writePDF(to: input, pageCount: 2, marker: "RO")
+
+        let readOnlyDir = workspace.appendingPathComponent("readonly", isDirectory: true)
+        try FileManager.default.createDirectory(at: readOnlyDir, withIntermediateDirectories: true)
+        let tempRoot = workspace.appendingPathComponent("temp-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        try "ok".write(to: tempRoot.appendingPathComponent("canary.txt"), atomically: true, encoding: .utf8)
+
+        let output = readOnlyDir.appendingPathComponent("out.pdf")
+        try writePDF(to: output, pageCount: 1, marker: "OLD")
+
+        try setPOSIXPermissions(of: readOnlyDir, to: 0o555)
+        defer { try? setPOSIXPermissions(of: readOnlyDir, to: 0o755) }
+
+        let plans = [
+            MergePipelineService.InputPlan(index: 0, url: input, title: "Readonly", shouldImportSourceBookmarks: true),
+        ]
+
+        XCTAssertThrowsError(
+            try MergePipelineService.run(
+                plans: plans,
+                destination: output,
+                isCancelled: { false },
+                progress: { _ in },
+                tempDirectoryCandidates: [tempRoot]
+            )
+        ) { error in
+            guard let pipelineError = error as? MergePipelineService.PipelineError else {
+                XCTFail("Unerwarteter Fehlertyp: \(error)")
+                return
+            }
+            guard case .outputSaveFailed(let message) = pipelineError else {
+                XCTFail("Erwartet outputSaveFailed, erhalten: \(pipelineError)")
+                return
+            }
+            XCTAssertFalse(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
 
@@ -146,5 +228,9 @@ final class MergePipelineServiceTests: XCTestCase {
                 NSLocalizedDescriptionKey: "Konnte Test-PDF nicht schreiben: \(url.path)",
             ])
         }
+    }
+
+    private func setPOSIXPermissions(of url: URL, to value: Int16) throws {
+        try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: value)], ofItemAtPath: url.path)
     }
 }

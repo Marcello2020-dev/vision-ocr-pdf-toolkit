@@ -2,6 +2,28 @@ import Foundation
 import PDFKit
 
 struct MergePipelineService {
+    struct PreflightIssue: Sendable {
+        enum Kind: Sendable {
+            case unreadable
+            case passwordProtected
+            case emptyOrDefective
+        }
+
+        let url: URL
+        let kind: Kind
+
+        var localizedReason: String {
+            switch kind {
+            case .unreadable:
+                return "Datei kann nicht gelesen werden."
+            case .passwordProtected:
+                return "Datei ist passwortgeschützt."
+            case .emptyOrDefective:
+                return "Datei ist leer oder defekt."
+            }
+        }
+    }
+
     struct InputPlan: Sendable {
         let index: Int
         let url: URL
@@ -119,7 +141,8 @@ struct MergePipelineService {
         plans: [InputPlan],
         destination outFile: URL,
         isCancelled: @escaping () -> Bool,
-        progress: @escaping (ProgressUpdate) -> Void
+        progress: @escaping (ProgressUpdate) -> Void,
+        tempDirectoryCandidates: [URL]? = nil
     ) throws -> URL {
         let cancellation = CancellationProbe(check: isCancelled)
         let progressReporter = ProgressReporter(report: progress)
@@ -151,7 +174,11 @@ struct MergePipelineService {
         let fm = FileManager.default
         let tempDir: URL
         do {
-            tempDir = try createTempMergeDirectory(fileManager: fm, preferredBase: outFile.deletingLastPathComponent())
+            tempDir = try createTempMergeDirectory(
+                fileManager: fm,
+                preferredBase: outFile.deletingLastPathComponent(),
+                customCandidates: tempDirectoryCandidates
+            )
         } catch {
             throw PipelineError.cannotCreateTempDirectory
         }
@@ -214,8 +241,53 @@ struct MergePipelineService {
         return outFile
     }
 
-    private static func createTempMergeDirectory(fileManager fm: FileManager, preferredBase: URL) throws -> URL {
-        let candidates = [preferredBase, fm.temporaryDirectory]
+    static func preflightIssues(for plans: [InputPlan]) -> [PreflightIssue] {
+        plans.compactMap { preflightIssue(for: $0.url) }
+    }
+
+    static func cleanupStaleTemporaryMergeFolders(maxAge: TimeInterval = 60 * 60 * 6) {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+        let now = Date()
+
+        guard let entries = try? fm.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .creationDateKey],
+            options: []
+        ) else {
+            return
+        }
+
+        for entry in entries where entry.lastPathComponent.hasPrefix(".pdfmerge-") {
+            guard let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey, .creationDateKey]),
+                  values.isDirectory == true
+            else {
+                continue
+            }
+
+            let lastTouched = values.contentModificationDate ?? values.creationDate ?? .distantPast
+            guard now.timeIntervalSince(lastTouched) >= maxAge else { continue }
+            try? fm.removeItem(at: entry)
+        }
+    }
+
+    private static func createTempMergeDirectory(
+        fileManager fm: FileManager,
+        preferredBase: URL,
+        customCandidates: [URL]? = nil
+    ) throws -> URL {
+        var candidates: [URL] = []
+        if let customCandidates {
+            candidates.append(contentsOf: customCandidates)
+        }
+        candidates.append(fm.temporaryDirectory)
+        candidates.append(preferredBase)
+
+        var seen = Set<String>()
+        candidates = candidates.filter { base in
+            let key = base.standardizedFileURL.path
+            return seen.insert(key).inserted
+        }
 
         for base in candidates {
             let dir = base.appendingPathComponent(".pdfmerge-\(UUID().uuidString)", isDirectory: true)
@@ -228,6 +300,22 @@ struct MergePipelineService {
         }
 
         throw PipelineError.cannotCreateTempDirectory
+    }
+
+    private static func preflightIssue(for url: URL) -> PreflightIssue? {
+        guard let doc = PDFDocument(url: url) else {
+            return PreflightIssue(url: url, kind: .unreadable)
+        }
+
+        if doc.isLocked {
+            return PreflightIssue(url: url, kind: .passwordProtected)
+        }
+
+        guard doc.pageCount > 0, doc.page(at: 0) != nil else {
+            return PreflightIssue(url: url, kind: .emptyOrDefective)
+        }
+
+        return nil
     }
 
     private static func throwIfCancelled(_ isCancelled: () -> Bool) throws {
