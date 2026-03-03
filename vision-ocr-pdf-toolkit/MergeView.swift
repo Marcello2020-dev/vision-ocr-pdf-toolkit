@@ -17,6 +17,49 @@ struct MergeView: View {
         let includeSourceBookmarksByURL: [URL: Bool]
     }
 
+    private struct MergeInputPlan {
+        let index: Int
+        let url: URL
+        let title: String
+        let shouldImportSourceBookmarks: Bool
+    }
+
+    private struct PreparedMergeInput {
+        let title: String
+        let pageCount: Int
+        let sourceNodes: [PDFKitOutline.SourceNode]
+        let preserveSourceTopLevel: Bool
+    }
+
+    private enum MergePipelineError: LocalizedError {
+        case cancelled
+        case unreadableInput(URL)
+        case cannotCreateTempDirectory
+        case cannotOpenMergedTemp
+        case cannotWriteFinalTemp
+        case outlineValidationFailed
+        case outputSaveFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .cancelled:
+                return "Merge wurde abgebrochen."
+            case .unreadableInput(let url):
+                return "PDF konnte nicht gelesen werden: \(url.lastPathComponent)"
+            case .cannotCreateTempDirectory:
+                return "Temporärer Merge-Ordner konnte nicht erstellt werden."
+            case .cannotOpenMergedTemp:
+                return "Temporäres Merge-Dokument konnte nicht geöffnet werden."
+            case .cannotWriteFinalTemp:
+                return "Finale Merge-Datei konnte nicht geschrieben werden."
+            case .outlineValidationFailed:
+                return "Bookmarks konnten nicht stabil gespeichert werden."
+            case .outputSaveFailed(let message):
+                return "Merge-Datei konnte nicht gespeichert werden: \(message)"
+            }
+        }
+    }
+
     @Environment(\.undoManager) private var undoManager
 
     @State private var inputPDFs: [URL] = []
@@ -36,8 +79,11 @@ struct MergeView: View {
     @State private var lastMergedPDFURL: URL? = nil         // zuletzt erzeugte Merge-PDF
     @State private var suppressInputPDFsOnChange: Bool = false
     @State private var waitCursorPushed: Bool = false
-    @State private var showMergeSuccessMarker: Bool = false
-    @State private var mergeSuccessHideWorkItem: DispatchWorkItem? = nil
+    @State private var mergeWorkItem: DispatchWorkItem? = nil
+    @State private var mergeProgressValue: Double = 0
+    @State private var mergeProgressLabel: String = ""
+    @State private var mergeErrorMessage: String? = nil
+    @State private var showMergeErrorAlert: Bool = false
 
     private func refreshBookmarksFromFilenames(overwrite: Bool) {
         let before = captureUndoSnapshot()
@@ -147,23 +193,29 @@ struct MergeView: View {
         waitCursorPushed = false
     }
 
-    private func scheduleMergeSuccessMarkerHide() {
-        mergeSuccessHideWorkItem?.cancel()
-        let work = DispatchWorkItem {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                showMergeSuccessMarker = false
-            }
-            mergeSuccessHideWorkItem = nil
-        }
-        mergeSuccessHideWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
+    private func cancelMerge() {
+        guard let mergeWorkItem else { return }
+        mergeWorkItem.cancel()
+        mergeProgressLabel = "Abbrechen…"
     }
 
-    private func markMergeSuccess() {
-        withAnimation(.easeInOut(duration: 0.2)) {
-            showMergeSuccessMarker = true
+    private func setMergeProgress(_ value: Double, _ label: String) {
+        mergeProgressValue = min(max(value, 0), 1)
+        mergeProgressLabel = label
+    }
+
+    private func failMerge(with error: Error) {
+        if let pipelineError = error as? MergePipelineError, case .cancelled = pipelineError {
+            mergeErrorMessage = nil
+            return
         }
-        scheduleMergeSuccessMarkerHide()
+        if error is CancellationError {
+            mergeErrorMessage = nil
+            return
+        }
+
+        mergeErrorMessage = error.localizedDescription
+        showMergeErrorAlert = true
     }
 
     var body: some View {
@@ -204,11 +256,20 @@ struct MergeView: View {
                 Button("Merge-PDF im Finder zeigen") { openLastMergedPDF() }
                     .disabled(lastMergedPDFURL == nil || isRunning)
 
-                if showMergeSuccessMarker && !isRunning {
-                    Label("Merge fertig", systemImage: "checkmark.circle.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.green)
-                        .transition(.opacity.combined(with: .scale))
+                if isRunning {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        ProgressView(value: mergeProgressValue, total: 1.0)
+                            .frame(width: 180)
+
+                        Text(mergeProgressLabel)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Button("Abbrechen", role: .destructive) {
+                        cancelMerge()
+                    }
                 }
 
                 Button("Merge") {
@@ -217,6 +278,13 @@ struct MergeView: View {
                 .disabled(
                     inputPDFs.isEmpty || isRunning
                 )
+            }
+
+            if let mergeErrorMessage, !isRunning {
+                Label(mergeErrorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
             }
 
             Text("Input & Bookmark-Regeln (Reihenfolge = Merge-Reihenfolge; Drag & Drop zum Umsortieren):")
@@ -298,10 +366,16 @@ struct MergeView: View {
         .onChange(of: isRunning) { _, running in
             syncWaitCursor(with: running)
         }
+        .alert("Merge fehlgeschlagen", isPresented: $showMergeErrorAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(mergeErrorMessage ?? "Unbekannter Fehler")
+        }
         .onDisappear {
             syncWaitCursor(with: false)
-            mergeSuccessHideWorkItem?.cancel()
-            mergeSuccessHideWorkItem = nil
+            mergeWorkItem?.cancel()
+            mergeWorkItem = nil
+            isRunning = false
         }
     }
 
@@ -427,127 +501,257 @@ struct MergeView: View {
 
     // MARK: - PDFKit Merge
     private func runMergeWithBookmarks() {
+        guard !isRunning else { return }
         guard let outFile = chooseOutputPDFURL() else {
             return
         }
 
-        mergeSuccessHideWorkItem?.cancel()
-        mergeSuccessHideWorkItem = nil
-        showMergeSuccessMarker = false
-        isRunning = true
-        
-        func saveFinalPDF(from tmpURL: URL, cleanupDir: URL, destination outFile: URL) {
-            defer {
-                try? FileManager.default.removeItem(at: cleanupDir)
-            }
-            do {
-                // Wenn die Temp-Datei weg ist: Ziel NICHT anfassen
-                guard FileManager.default.fileExists(atPath: tmpURL.path) else {
-                    return
-                }
-
-                if FileManager.default.fileExists(atPath: outFile.path) {
-                    // Save-Panel bestätigt Überschreiben; hier erfolgt der atomare Replace.
-                    _ = try FileManager.default.replaceItemAt(
-                        outFile,
-                        withItemAt: tmpURL,
-                        backupItemName: nil,
-                        options: []
-                    )
-                } else {
-                    try FileManager.default.moveItem(at: tmpURL, to: outFile)
-                }
-
-                self.lastMergedPDFURL = outFile
-                self.markMergeSuccess()
-            } catch {}
-        }
-
-        // 1) Page counts via PDFKit + build bookmark plan (including source outlines)
-        var sections: [PDFKitOutline.Section] = []
-        sections.reserveCapacity(inputPDFs.count)
-        var pageCursor = 1
-
-        for url in inputPDFs {
-            guard let doc = PDFDocument(url: url) else {
-                isRunning = false
-                return
-            }
-
+        let plans: [MergeInputPlan] = inputPDFs.enumerated().map { index, url in
             let rawTitle = (bookmarkTitles[url] ?? BookmarkTitleBuilder.defaultTitle(for: url))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let title = rawTitle.isEmpty ? BookmarkTitleBuilder.defaultTitle(for: url) : rawTitle
 
-            let shouldImportSourceBookmarks = includeSourceBookmarksByURL[url] ?? true
-            let sourceNodes: [PDFKitOutline.SourceNode]
-            let preserveSourceTopLevel: Bool
-
-            if shouldImportSourceBookmarks {
-                sourceNodes = PDFKitOutline.extractSourceNodes(from: doc)
-                let importedCount = PDFKitOutline.countNodes(sourceNodes)
-                preserveSourceTopLevel = importedCount > 0
-            } else {
-                sourceNodes = []
-                preserveSourceTopLevel = false
-            }
-
-            sections.append(
-                PDFKitOutline.Section(
-                    title: title,
-                    startPage: pageCursor,
-                    sourceNodes: sourceNodes,
-                    preserveSourceTopLevel: preserveSourceTopLevel
-                )
+            return MergeInputPlan(
+                index: index,
+                url: url,
+                title: title,
+                shouldImportSourceBookmarks: includeSourceBookmarksByURL[url] ?? true
             )
-            pageCursor += doc.pageCount
         }
 
-        // Temp paths
-        let tempDir = FileManager.default.temporaryDirectory
+        mergeWorkItem?.cancel()
+        mergeErrorMessage = nil
+        showMergeErrorAlert = false
+        setMergeProgress(0.01, "Vorbereitung…")
+        isRunning = true
+
+        var workItem: DispatchWorkItem!
+        workItem = DispatchWorkItem(qos: .userInitiated) {
+            let progress: (Double, String) -> Void = { value, label in
+                DispatchQueue.main.async {
+                    guard self.isRunning else { return }
+                    self.setMergeProgress(value, label)
+                }
+            }
+
+            do {
+                let savedURL = try self.performMergePipeline(
+                    plans: plans,
+                    destination: outFile,
+                    isCancelled: { workItem.isCancelled },
+                    progress: progress
+                )
+
+                if workItem.isCancelled {
+                    throw MergePipelineError.cancelled
+                }
+
+                DispatchQueue.main.async {
+                    guard !workItem.isCancelled else {
+                        self.isRunning = false
+                        self.mergeWorkItem = nil
+                        self.setMergeProgress(0, "Abgebrochen")
+                        return
+                    }
+
+                    self.lastMergedPDFURL = savedURL
+                    self.isRunning = false
+                    self.mergeWorkItem = nil
+                    self.setMergeProgress(1, "Fertig")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isRunning = false
+                    self.mergeWorkItem = nil
+
+                    if let pipelineError = error as? MergePipelineError, case .cancelled = pipelineError {
+                        self.setMergeProgress(0, "Abgebrochen")
+                        return
+                    }
+                    if error is CancellationError {
+                        self.setMergeProgress(0, "Abgebrochen")
+                        return
+                    }
+
+                    self.setMergeProgress(0, "")
+                    self.failMerge(with: error)
+                }
+            }
+        }
+
+        mergeWorkItem = workItem
+        DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
+    }
+
+    private func throwIfCancelled(_ isCancelled: () -> Bool) throws {
+        if isCancelled() {
+            throw MergePipelineError.cancelled
+        }
+    }
+
+    private func prepareMergeInputs(
+        _ plans: [MergeInputPlan],
+        isCancelled: @escaping () -> Bool,
+        progress: @escaping (Double, String) -> Void
+    ) throws -> [PreparedMergeInput] {
+        try throwIfCancelled(isCancelled)
+
+        let total = max(plans.count, 1)
+        var prepared = Array<PreparedMergeInput?>(repeating: nil, count: plans.count)
+        let lock = NSLock()
+        var firstError: Error? = nil
+        var completed = 0
+
+        let queue = DispatchQueue(label: "merge.prepare.concurrent", qos: .userInitiated, attributes: .concurrent)
+        let group = DispatchGroup()
+
+        for plan in plans {
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+
+                if isCancelled() { return }
+
+                guard let doc = PDFDocument(url: plan.url) else {
+                    lock.lock()
+                    if firstError == nil {
+                        firstError = MergePipelineError.unreadableInput(plan.url)
+                    }
+                    lock.unlock()
+                    return
+                }
+
+                let sourceNodes = plan.shouldImportSourceBookmarks ? PDFKitOutline.extractSourceNodes(from: doc) : []
+                let preparedItem = PreparedMergeInput(
+                    title: plan.title,
+                    pageCount: doc.pageCount,
+                    sourceNodes: sourceNodes,
+                    preserveSourceTopLevel: plan.shouldImportSourceBookmarks && !sourceNodes.isEmpty
+                )
+
+                var localCompleted = 0
+                lock.lock()
+                if firstError == nil {
+                    prepared[plan.index] = preparedItem
+                    completed += 1
+                    localCompleted = completed
+                }
+                lock.unlock()
+
+                if localCompleted > 0 {
+                    let p = 0.08 + (Double(localCompleted) / Double(total)) * 0.24
+                    progress(p, "Analysiere PDFs (\(localCompleted)/\(plans.count))…")
+                }
+            }
+        }
+
+        group.wait()
+        try throwIfCancelled(isCancelled)
+        if let firstError {
+            throw firstError
+        }
+
+        return try prepared.enumerated().map { index, item in
+            guard let item else {
+                throw MergePipelineError.unreadableInput(plans[index].url)
+            }
+            return item
+        }
+    }
+
+    private func performMergePipeline(
+        plans: [MergeInputPlan],
+        destination outFile: URL,
+        isCancelled: @escaping () -> Bool,
+        progress: @escaping (Double, String) -> Void
+    ) throws -> URL {
+        try throwIfCancelled(isCancelled)
+        progress(0.05, "Analysiere PDFs (0/\(plans.count))…")
+        let preparedInputs = try prepareMergeInputs(plans, isCancelled: isCancelled, progress: progress)
+
+        try throwIfCancelled(isCancelled)
+        progress(0.34, "Erstelle Bookmark-Plan…")
+
+        var sections: [PDFKitOutline.Section] = []
+        sections.reserveCapacity(preparedInputs.count)
+        var pageCursor = 1
+        for prepared in preparedInputs {
+            sections.append(
+                PDFKitOutline.Section(
+                    title: prepared.title,
+                    startPage: pageCursor,
+                    sourceNodes: prepared.sourceNodes,
+                    preserveSourceTopLevel: prepared.preserveSourceTopLevel
+                )
+            )
+            pageCursor += prepared.pageCount
+        }
+
+        try throwIfCancelled(isCancelled)
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory
             .appendingPathComponent("pdfmerge-\(UUID().uuidString)", isDirectory: true)
 
         do {
-            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
         } catch {
-            isRunning = false
-            return
+            throw MergePipelineError.cannotCreateTempDirectory
         }
+        defer { try? fm.removeItem(at: tempDir) }
 
         let mergedTmp = tempDir.appendingPathComponent("merged_tmp.pdf")
         let finalTmp = tempDir.appendingPathComponent("final_tmp.pdf")
 
+        progress(0.40, "Merge PDFs (0/\(plans.count))…")
         do {
-            try PDFKitMerger.merge(inputPDFs, to: mergedTmp)
+            try PDFKitMerger.merge(
+                plans.map(\.url),
+                to: mergedTmp,
+                isCancelled: isCancelled,
+                onInputMerged: { done, total in
+                    let p = 0.40 + (Double(done) / Double(max(total, 1))) * 0.34
+                    progress(p, "Merge PDFs (\(done)/\(total))…")
+                }
+            )
+        } catch is CancellationError {
+            throw MergePipelineError.cancelled
         } catch {
-            self.isRunning = false
-            try? FileManager.default.removeItem(at: tempDir)
-            return
+            throw error
         }
 
-        // Step 2: Apply bookmarks via PDFKit
+        try throwIfCancelled(isCancelled)
+        progress(0.78, "Wende Bookmarks an…")
         guard let mergedDoc = PDFDocument(url: mergedTmp) else {
-            self.isRunning = false
-            try? FileManager.default.removeItem(at: tempDir)
-            return
+            throw MergePipelineError.cannotOpenMergedTemp
         }
 
         PDFKitOutline.applyOutline(to: mergedDoc, sections: sections)
         let expectedRootCount = PDFKitOutline.expectedRootCount(for: sections)
 
+        progress(0.86, "Schreibe Ergebnis…")
         guard mergedDoc.write(to: finalTmp) else {
-            self.isRunning = false
-            try? FileManager.default.removeItem(at: tempDir)
-            return
+            throw MergePipelineError.cannotWriteFinalTemp
         }
 
+        try throwIfCancelled(isCancelled)
+        progress(0.92, "Validiere Ergebnis…")
         guard PDFKitOutline.validateOutlinePersisted(at: finalTmp, expectedCount: expectedRootCount) else {
-            self.isRunning = false
-            try? FileManager.default.removeItem(at: tempDir)
-            return
+            throw MergePipelineError.outlineValidationFailed
         }
 
-        // Success: save finalTmp into Output folder
-        self.isRunning = false
-        saveFinalPDF(from: finalTmp, cleanupDir: tempDir, destination: outFile)
+        try throwIfCancelled(isCancelled)
+        progress(0.96, "Speichere Datei…")
+        do {
+            if fm.fileExists(atPath: outFile.path) {
+                _ = try fm.replaceItemAt(outFile, withItemAt: finalTmp, backupItemName: nil, options: [])
+            } else {
+                try fm.moveItem(at: finalTmp, to: outFile)
+            }
+        } catch {
+            throw MergePipelineError.outputSaveFailed(error.localizedDescription)
+        }
+
+        progress(1.0, "Fertig")
+        return outFile
     }
 }
